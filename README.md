@@ -27,7 +27,7 @@
 .
 ├── music-help.user.js   # 油猴脚本（核心）
 ├── index.html           # 使用说明页
-├── extension/           # 浏览器扩展（标签静音 + 开机自启，规划中）
+├── extension/           # 浏览器扩展（标签静音 + 开机自启，独立可用）
 └── LICENSE
 ```
 
