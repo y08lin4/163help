@@ -33,6 +33,11 @@
   .install a.btn { display: inline-block; background: var(--brand); color: #fff; padding: 12px 28px; border-radius: 8px; text-decoration: none; font-size: 15px; font-weight: 600; }
   .install code { display: block; margin-top: 12px; }
   .notice { background: #fff7e6; border: 1px solid #ffd591; color: #874d00; border-radius: 8px; padding: 14px; font-size: 13px; }
+  .choice-tip { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .method { border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; margin: 14px 0; background: #fbfcfe; }
+  .method h3 { margin-top: 0; }
+  .method .install { margin-top: 10px; }
+  .tip { background: #fff7e6; border: 1px solid #ffd591; color: #874d00; border-radius: 8px; padding: 10px 12px; font-size: 13px; margin: 12px 0 0; }
 </style>
 </head>
 <body>
@@ -44,14 +49,31 @@
 
   <section>
     <h2>一、安装</h2>
-    <ol>
-      <li>安装浏览器插件 <b>Tampermonkey</b>（油猴）</li>
-      <li>打开下方脚本地址，Tampermonkey 会弹出安装确认，点「安装」</li>
-      <li>如果浏览器直接显示源码，复制地址到 Tampermonkey 的「从 URL 安装」</li>
-    </ol>
-    <div class="install">
-      <a class="btn" href="/music-help.user.js">安装脚本</a>
-      <code>/music-help.user.js</code>
+    <p class="choice-tip">以下两种方式任选其一，均可正常使用互助功能。</p>
+
+    <div class="method">
+      <h3>方式一：油猴脚本（需安装 Tampermonkey）</h3>
+      <ol>
+        <li>安装浏览器插件 <b>Tampermonkey</b>（油猴）</li>
+        <li>打开下方脚本地址，Tampermonkey 会弹出安装确认，点「安装」</li>
+        <li>如果浏览器直接显示源码，复制地址到 Tampermonkey 的「从 URL 安装」</li>
+      </ol>
+      <div class="install">
+        <a class="btn" href="/music-help.user.js">安装脚本</a>
+        <code>/music-help.user.js</code>
+      </div>
+    </div>
+
+    <div class="method">
+      <h3>方式二：浏览器扩展（无需油猴）</h3>
+      <p>扩展是油猴脚本的独立移植版，<b>不需要安装 Tampermonkey</b>。额外功能：<b>开机自启</b> + <b>标签静音</b>（只静音网易云音乐标签，其它标签不碰）。</p>
+      <ol>
+        <li>去 GitHub 下载 <code>163help-extension-v4.0.7.zip</code>：<a href="https://github.com/y08lin4/163help/releases" target="_blank" rel="noopener">https://github.com/y08lin4/163help/releases</a></li>
+        <li>解压，会得到一个 <code>extension/</code> 文件夹</li>
+        <li>Chrome 打开 <code>chrome://extensions</code>，点击右上角「开发者模式」</li>
+        <li>点「加载已解压的扩展程序」，选择 <code>extension/</code> 文件夹（就是直接包含 <code>manifest.json</code> 的那一层）</li>
+      </ol>
+      <p class="tip">提示：扩展和油猴是两套独立存储，切换过去需要重新登录一次。</p>
     </div>
   </section>
 
