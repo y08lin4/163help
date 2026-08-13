@@ -21,7 +21,10 @@ function isMusic163Url(url) {
 }
 
 function openMusicTab() {
-    chrome.tabs.create({ url: MUSIC_URL, muted: true });
+    chrome.tabs.create({ url: MUSIC_URL }, function (tab) {
+        if (chrome.runtime.lastError) return;
+        muteMusicTab(tab.id);
+    });
 }
 
 function muteMusicTab(tabId) {
