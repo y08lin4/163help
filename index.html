@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>网易云音乐互助 · 使用说明</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f7f9fc;
+    --panel: #ffffff;
+    --text: #1a2233;
+    --muted: #5c6b82;
+    --brand: #d33;
+    --line: #e3e8f0;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); line-height: 1.7; }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 32px 20px; }
+  header { text-align: center; padding: 24px 0; }
+  header h1 { font-size: 28px; margin: 0 0 8px; }
+  header p { color: var(--muted); margin: 0; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 24px; margin: 16px 0; }
+  h2 { margin: 0 0 14px; font-size: 19px; }
+  h3 { font-size: 15px; margin: 16px 0 8px; }
+  code { background: #f0f3f8; padding: 2px 6px; border-radius: 4px; font-size: 13px; word-break: break-all; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; margin: 10px 0; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; background: #fbfcfe; }
+  ol, ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 6px 0; }
+  .install { text-align: center; }
+  .install a.btn { display: inline-block; background: var(--brand); color: #fff; padding: 12px 28px; border-radius: 8px; text-decoration: none; font-size: 15px; font-weight: 600; }
+  .install code { display: block; margin-top: 12px; }
+  .notice { background: #fff7e6; border: 1px solid #ffd591; color: #874d00; border-radius: 8px; padding: 14px; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>🎵 网易云音乐互助</h1>
+    <p>使用说明</p>
+  </header>
+
+  <section>
+    <h2>一、安装</h2>
+    <ol>
+      <li>安装浏览器插件 <b>Tampermonkey</b>（油猴）</li>
+      <li>打开下方脚本地址，Tampermonkey 会弹出安装确认，点「安装」</li>
+      <li>如果浏览器直接显示源码，复制地址到 Tampermonkey 的「从 URL 安装」</li>
+    </ol>
+    <div class="install">
+      <a class="btn" href="/music-help.user.js">安装脚本</a>
+      <code>/music-help.user.js</code>
+    </div>
+  </section>
+
+  <section>
+    <h2>二、使用</h2>
+    <ol>
+      <li>打开网页版 <b>music.163.com</b>（不是客户端）</li>
+      <li>页面右侧出现「🎵 互助面板」，点「我已阅读并确认」</li>
+      <li>点「登录 Linux.do」，完成授权</li>
+      <li>输入歌曲/专辑 ID（每行一个，如 <code>song:123</code> 或 <code>album:456</code>，也可直接填数字）</li>
+      <li>点「开启互助」，脚本自动帮你播放 + 帮别人播放</li>
+    </ol>
+    <h3>歌曲 ID 在哪找</h3>
+    <ul>
+      <li>单曲：歌曲页网址里的 <code>song?id=xxx</code></li>
+      <li>专辑：专辑页网址里的 <code>album?id=xxx</code></li>
+    </ul>
+    <h3>面板功能</h3>
+    <table>
+      <tr><th>功能</th><th>说明</th></tr>
+      <tr><td>偏好选择</td><td>短歌优先 / 长歌优先 / 随机</td></tr>
+      <tr><td>只帮不助</td><td>歌曲列表留空 = 只帮别人赚积分，不加入被助队列</td></tr>
+      <tr><td>自动开启</td><td>勾选后，配合浏览器主页实现「开浏览器就互助」</td></tr>
+    </table>
+  </section>
+
+  <section>
+    <h2>三、派发与概率规则</h2>
+    <h3>积分（按秒计费）</h3>
+    <p><b>1 点 = 1 秒播放时长</b>。帮助者每听 1 秒赚 1 点，被助者每被听 1 秒扣 1 点，严格守恒。</p>
+    <h3>派发优先级（越靠前越先派）</h3>
+    <ol>
+      <li><b>本月被助次数少</b>的优先（先进来的先刷满）</li>
+      <li><b>今日被播次数少</b>的优先（平滑，不集中一天）</li>
+      <li><b>用户偏好</b>（短歌/长歌）</li>
+      <li><b>注册时间早</b>的优先（先进先出）</li>
+    </ol>
+    <h3>限额（按次数）</h3>
+    <table>
+      <tr><th>限制</th><th>规则</th></tr>
+      <tr><td>单曲每日被播</td><td>30 次/天</td></tr>
+      <tr><td>单用户每日被助</td><td>30 次/天</td></tr>
+      <tr><td>月度被助</td><td>750 次/月</td></tr>
+      <tr><td>最多挂歌</td><td>3 首</td></tr>
+      <tr><td>帮过才被助</td><td>至少成功帮过 1 次</td></tr>
+    </table>
+    <h3>防风控</h3>
+    <ul>
+      <li>连续播放 <b>30~60 分钟</b>（随机）后自动休息一下</li>
+      <li>同一首歌 <b>5 分钟</b>内不重复派发</li>
+      <li>改歌（换歌）需要管理员审核</li>
+    </ul>
+  </section>
+
+  <section class="notice">
+    本脚本仅用于个人学习、研究与浏览器自动化实践。请遵守网易云音乐、Linux.do 及相关法律法规。因使用产生的账号、数据、版权、合规等风险由使用者自行承担。
+  </section>
+</div>
+</body>
+</html>
