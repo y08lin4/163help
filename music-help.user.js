@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         网易云音乐互助播放脚本
 // @namespace    http://tampermonkey.net/
-// @version      4.0.11
+// @version      4.0.13
 // @description  V4.0.6：播放进度心跳（反作弊数据收集）。
 // @author       y08lin4
 // @downloadURL  https://163music.linyu.qzz.io/music-help.user.js
@@ -20,7 +20,7 @@
     if (window.self !== window.top) return;
 
     const API_BASE = 'https://163music.linyu.qzz.io/api';
-    const CURRENT_VERSION = '4.0.11';
+    const CURRENT_VERSION = '4.0.13';
     const UPDATE_FALLBACK_URL = 'https://163music.linyu.qzz.io/music-help.user.js';
     const TOKEN_KEY = 'musicHelperToken';
     const LEGACY_TOKEN_KEY = 'linuxDoToken';
@@ -36,9 +36,14 @@
         '如果你不同意以上说明，请立即停用并删除本脚本。'
     ].join('\n');
     const JOIN_REFRESH_INTERVAL_MS = 10 * 60 * 1000;
+    const SONG_META_CACHE_KEY = 'musicHelperSongMetaCache';
+    const SONG_META_CACHE_TTL_MS = 60 * 60 * 1000; // 歌曲时长/可播状态解析结果缓存 1 小时
     const TOKEN_REFRESH_SKEW_MS = 5000;
     const TAB_LOCK_HEARTBEAT_MS = 5000;
     const TAB_LOCK_STALE_MS = 15000;
+    const PLAYBACK_STALL_MS = 40000; // 播放中进度持续不动（VIP 试听卡死等）判定的阈值，40 秒
+    let songSlotLimit = 3; // 当前用户可挂歌槽位数（动态，来自 /api/me 的 song_slot_limit，默认 3）
+    let pendingSlotApplication = false; // 是否存在待审核的槽位申请
 
     let isHelperRunning = false;
     let monitorTimer = null;
@@ -51,8 +56,7 @@
     let tabLockTimer = null;
     let tabLockOwned = false;
     let currentParticipantCredits = null;
-    let currentEarnedHelpStats = null;
-    let activityStats = null;
+    let updateAvailable = false;
     let autoStartTriggered = false;
 
     const TAB_INSTANCE_ID = getOrCreateTabInstanceId();
@@ -392,8 +396,8 @@
     }
 
     async function prepareTargetPlayback(targetSongId) {
-        if (!targetSongId) return false;
-        if (!await isPlayableSong(targetSongId)) return false;
+        if (!targetSongId) return 'load_failed';
+        if (!await isPlayableSong(targetSongId)) return 'song_unplayable';
         try { const p = getSafePlayer(); if(p && p.stop) p.stop(); } catch(e) {}
         ensureTargetSong(targetSongId);
         await wait(600);
@@ -401,7 +405,8 @@
         const forcePlayed = await forcePlayTargetSong(targetSongId);
         await wait(600);
         await clearPlayQueueBestEffort();
-        return forcePlayed;
+        // 返回空串表示播放准备成功；否则返回失败原因（song_unplayable / load_failed）
+        return forcePlayed ? '' : 'load_failed';
     }
 
     function formatTime(ms) { if (isNaN(ms) || ms <= 0) return "00:00"; const s = Math.floor(ms / 1000); return `${Math.floor(s/60).toString().padStart(2,'0')}:${(s%60).toString().padStart(2,'0')}`; }
@@ -436,6 +441,7 @@
     }
 
     function showUpdateButton(label = '更新脚本') {
+        updateAvailable = true;
         const updateButton = document.getElementById('update-script-btn');
         const headerUpdateLink = document.getElementById('header-update-link');
         if (updateButton) {
@@ -446,16 +452,15 @@
             headerUpdateLink.innerText = label;
             headerUpdateLink.style.display = 'block';
         }
+        updateMinButtonState();
     }
     function getErrorText(code) {
         if (code === 'banned') return '当前账号已被管理员封禁，互助与登录态已失效。';
         if (code === 'registration_required') return '当前账号尚未完成注册，请先完成开通流程。';
         if (code === 'invalid_or_expired_token') return '登录态已失效，请重新登录。';
-        if (code === 'token_session_conflict') return '当前账号已在其他设备重新登录，当前页面登录态已失效。';
         if (code === 'tab_conflict') return '当前账号已经在另一个标签页运行，本页已停止服务。';
         if (code === 'client_upgrade_required') return '当前脚本版本过旧，请先更新到最新版本后再继续使用。';
-        if (code === 'service_paused') return '北京时间每日 0:00-8:00 暂停互助，请 8:00 后再试。';
-        if (code === 'service_d1_blocked') return '服务保护阈值已触发，已临时自动限流，请稍后再试。';
+        if (code === 'service_paused') return '服务已暂停，请稍后再试。';
         if (code === 'service_manual_blocked') return '服务已被管理员临时暂停，请稍后再试。';
         if (code === 'service_window_closed') return '当前不在开放使用日期内，请在管理员设置的开放日期内使用。';
         return code ? `发生错误：${code}` : '';
@@ -476,6 +481,7 @@
 
     function handleAccessError(code, messageOverride = '') {
         const text = messageOverride || getErrorText(code);
+        const isBanned = code === 'banned';
         stopHelper();
         clearStoredToken(code || 'unknown');
         const loginStatus = document.getElementById('login-status');
@@ -483,13 +489,16 @@
         const authSection = document.getElementById('auth-section');
         const helperForm = document.getElementById('helper-form');
         const logoutLink = document.getElementById('logout-link');
-        if (loginStatus) loginStatus.innerText = text || '访问受限';
+        const loginButton = document.getElementById('login-linuxdo');
+        if (loginStatus) loginStatus.innerText = isBanned ? '账号已被封禁，如有疑问请联系管理员' : (text || '访问受限');
         if (helperInfo) {
             helperInfo.style.display = 'block';
             helperInfo.innerText = text || '访问受限';
             setHelperInfoStyle('warn');
         }
         if (authSection) authSection.style.display = 'block';
+        // 封禁时隐藏「登录 Linux.do」按钮
+        if (loginButton) loginButton.style.display = isBanned ? 'none' : 'block';
         if (helperForm) helperForm.style.display = 'none';
         if (logoutLink) logoutLink.style.display = 'none';
     }
@@ -504,6 +513,7 @@
         const authSection = document.getElementById('auth-section');
         const helperForm = document.getElementById('helper-form');
         const logoutLink = document.getElementById('logout-link');
+        const toggleButton = document.getElementById('toggle-helper');
         if (loginStatus) loginStatus.innerText = token ? `已登录，${text}` : text;
         if (helperInfo) {
             helperInfo.style.display = 'block';
@@ -513,6 +523,13 @@
         if (authSection) authSection.style.display = token ? 'none' : 'block';
         if (helperForm) helperForm.style.display = token ? 'block' : 'none';
         if (logoutLink) logoutLink.style.display = token ? 'block' : 'none';
+        // 标签页冲突态：禁用「开启互助」并改文案
+        if (toggleButton) {
+            toggleButton.innerText = '已在其他标签页运行';
+            toggleButton.disabled = true;
+            toggleButton.style.background = 'var(--disabled)';
+        }
+        updateMinButtonState();
     }
 
     function handleServicePaused(payload = null) {
@@ -563,6 +580,7 @@
 
     function showUpgradeRequired(requiredVersion, latestVersion) {
         upgradeRequired = true;
+        updateAvailable = true;
         stopHelper();
         const loginStatus = document.getElementById('login-status');
         const helperInfo = document.getElementById('helper-info');
@@ -591,6 +609,7 @@
             updateButton.innerText = '立即更新脚本';
             updateButton.style.display = 'block';
         }
+        updateMinButtonState();
     }
 
     async function fetchJSON(path) {
@@ -600,6 +619,53 @@
         } catch (e) {
             return null;
         }
+    }
+
+    // ---- 歌曲元数据缓存（localStorage，TTL 内避免重复请求网易云 song/detail、player/url）----
+    function readSongMetaCache() {
+        try {
+            const raw = localStorage.getItem(SONG_META_CACHE_KEY);
+            const data = safeJSON(raw);
+            return data && typeof data === 'object' ? data : {};
+        } catch (e) {
+            return {};
+        }
+    }
+
+    function writeSongMetaCache(data) {
+        try {
+            localStorage.setItem(SONG_META_CACHE_KEY, JSON.stringify(data));
+        } catch (e) {}
+    }
+
+    function getCachedSongMeta(cacheKey) {
+        const cache = readSongMetaCache();
+        const entry = cache[cacheKey];
+        if (!entry || typeof entry !== 'object') return null;
+        if (!entry.updatedAt || Date.now() - entry.updatedAt > SONG_META_CACHE_TTL_MS) return null;
+        return entry;
+    }
+
+    function setCachedSongMeta(cacheKey, meta) {
+        const cache = readSongMetaCache();
+        cache[cacheKey] = Object.assign({}, meta, { updatedAt: Date.now() });
+        writeSongMetaCache(cache);
+    }
+
+    function invalidateSongMeta(cacheKey) {
+        const cache = readSongMetaCache();
+        if (cache[cacheKey]) {
+            delete cache[cacheKey];
+            writeSongMetaCache(cache);
+        }
+    }
+
+    function invalidateSongMetaList(musicIds) {
+        (musicIds || []).forEach(function (m) {
+            if (!m || !m.id) return;
+            const cacheKey = 'song:' + m.id;
+            invalidateSongMeta(cacheKey);
+        });
     }
 
     async function fetchSongDetail(songId) {
@@ -614,9 +680,19 @@
         const normalized = Array.from(new Set((songIds || [])
             .map(id => String(id || '').trim())
             .filter(id => /^\d+$/.test(id))));
+        // 优先复用已缓存的可播状态，未缓存/已过期的才去请求网易云 player/url
         const playable = new Set();
-        for (let i = 0; i < normalized.length; i += 80) {
-            const chunk = normalized.slice(i, i + 80);
+        const uncachedIds = [];
+        normalized.forEach(function (id) {
+            const cached = getCachedSongMeta('song:' + id);
+            if (cached && typeof cached.playable === 'boolean') {
+                if (cached.playable) playable.add(id);
+            } else {
+                uncachedIds.push(id);
+            }
+        });
+        for (let i = 0; i < uncachedIds.length; i += 80) {
+            const chunk = uncachedIds.slice(i, i + 80);
             const numericIds = chunk.map(id => Number(id));
             const data = await fetchJSON(`/api/song/enhance/player/url?ids=${encodeURIComponent(JSON.stringify(numericIds))}&br=128000`);
             const rows = Array.isArray(data && data.data) ? data.data : [];
@@ -631,19 +707,43 @@
     }
 
     async function isPlayableSong(songId) {
+        const cacheKey = 'song:' + songId;
+        const cached = getCachedSongMeta(cacheKey);
+        if (cached && typeof cached.playable === 'boolean') return cached.playable;
+
         const detail = await fetchSongDetail(songId);
         const durationMs = Number(detail && (detail.dt || detail.duration || 0));
-        if (!Number.isFinite(durationMs) || durationMs <= 0) return false;
+        const songName = detail && detail.name ? String(detail.name) : '';
+        if (!Number.isFinite(durationMs) || durationMs <= 0) {
+            setCachedSongMeta(cacheKey, { durationMs: 0, playable: false, name: songName });
+            return false;
+        }
         const playable = await fetchPlayableSongIds([songId]);
-        return playable.has(String(songId));
+        const result = playable.has(String(songId));
+        setCachedSongMeta(cacheKey, { durationMs: Math.floor(durationMs), playable: result, name: songName });
+        return result;
     }
 
     async function fetchSongDuration(songId) {
+        const cacheKey = 'song:' + songId;
+        const cached = getCachedSongMeta(cacheKey);
+        if (cached && typeof cached.playable === 'boolean') {
+            if (cached.playable && cached.durationMs > 0) return cached.durationMs;
+            // 已缓存为不可播/无时长：保留「当前正播放该歌」的实时进度兜底，不再重复请求网易云
+            const currentSongId = extractSongId(window.location.hash);
+            const { dur, state } = getProgress();
+            if (currentSongId === String(songId) && dur > 0 && state === 'play') return dur;
+            return 0;
+        }
+
         const detail = await fetchSongDetail(songId);
         const durationMs = Number(detail && (detail.dt || detail.duration || 0));
+        const songName = detail && detail.name ? String(detail.name) : '';
         if (Number.isFinite(durationMs) && durationMs > 0) {
             const playable = await fetchPlayableSongIds([songId]);
-            if (playable.has(String(songId))) return Math.floor(durationMs);
+            const isPlayable = playable.has(String(songId));
+            setCachedSongMeta(cacheKey, { durationMs: Math.floor(durationMs), playable: isPlayable, name: songName });
+            if (isPlayable) return Math.floor(durationMs);
         }
 
         const currentSongId = extractSongId(window.location.hash);
@@ -652,92 +752,16 @@
         return 0;
     }
 
-    async function fetchAlbumTracks(albumId) {
-        try {
-            const data = await fetchJSON(`/api/v1/album/${encodeURIComponent(String(albumId || '').trim())}`);
-            const songs = Array.isArray(data && data.songs) ? data.songs : [];
-            const tracks = songs
-                .map(song => {
-                    const id = String(song && song.id ? song.id : '').trim();
-                    const durationMs = Number(song && (song.dt || song.duration || 0));
-                    if (!/^\d+$/.test(id) || !Number.isFinite(durationMs) || durationMs <= 0) {
-                        return null;
-                    }
-                    return { id, durationMs: Math.floor(durationMs) };
-                })
-                .filter(Boolean);
-            if (tracks.length === 0) return [];
-            const playable = await fetchPlayableSongIds(tracks.map(track => track.id));
-            return tracks.filter(track => playable.has(track.id));
-        } catch (e) {
-            return [];
-        }
-    }
-
-    async function fetchAlbumSongIds(albumId) {
-        const tracks = await fetchAlbumTracks(albumId);
-        return tracks.map(track => track.id);
-    }
-
     function extractSongId(value) {
         const text = String(value || '');
         const match = text.match(/(?:song\?id=|\/song\?id=|id=)(\d+)/);
         return match ? match[1] : '';
     }
 
-    function getAlbumSongIds() {
-        const ids = new Set();
-        try {
-            const frame = document.getElementById('g_iframe');
-            if (!frame || !frame.contentDocument) return [];
-            const doc = frame.contentDocument;
-            const selectors = [
-                '.m-table a[href*="song?id="]',
-                '.n-songtb a[href*="song?id="]',
-                'a[href*="song?id="]',
-                '[data-res-id][data-res-type="18"]'
-            ];
-            selectors.forEach(selector => {
-                doc.querySelectorAll(selector).forEach(el => {
-                    const fromHref = extractSongId(el.getAttribute('href'));
-                    const fromData = /^\d+$/.test(String(el.getAttribute('data-res-id') || ''))
-                        ? String(el.getAttribute('data-res-id'))
-                        : '';
-                    const songId = fromHref || fromData;
-                    if (songId) ids.add(songId);
-                });
-            });
-        } catch (e) {}
-        return Array.from(ids);
-    }
-
-    async function resolveAlbumSongId(albumId) {
-        const apiSongIds = await fetchAlbumSongIds(albumId);
-        if (apiSongIds.length > 0) {
-            return apiSongIds[Math.floor(Math.random() * apiSongIds.length)];
-        }
-
-        window.location.hash = `#/album?id=${albumId}`;
-        const deadline = Date.now() + 15000;
-        while (Date.now() < deadline) {
-            const songIds = getAlbumSongIds();
-            if (songIds.length > 0) {
-                const playable = Array.from(await fetchPlayableSongIds(songIds));
-                if (playable.length > 0) return playable[Math.floor(Math.random() * playable.length)];
-            }
-            await wait(500);
-        }
-        return '';
-    }
-
     async function resolveMusicMeta(musicId, musicType) {
-        if (musicType === 'song') {
-            const durationMs = await fetchSongDuration(musicId);
-            return durationMs > 0 ? { durationMs } : null;
-        }
-
-        const tracks = await fetchAlbumTracks(musicId);
-        return tracks.length > 0 ? { tracks } : null;
+        if (musicType !== 'song') return null;
+        const durationMs = await fetchSongDuration(musicId);
+        return durationMs > 0 ? { durationMs } : null;
     }
 
     function parseMusicIds(text) {
@@ -753,31 +777,96 @@
                 id = parts[1].trim();
             }
             if (!/^\d+$/.test(id)) return;
-            if (type !== 'song' && type !== 'album') return;
+            if (type !== 'song') return;
             result.push({ type: type, id: id });
         });
         return result;
     }
 
+    // 保存歌曲用：逐行解析 → 规范化（song: 前缀）→ 去重 → 严格格式校验
+    // 返回去重后的规范化 ID 数组；含非法行时返回 null（与服务端 musicIDRE 一致）
+    function parseSaveSongs(text) {
+        const seen = {};
+        const ids = [];
+        let hasInvalid = false;
+        String(text || '').split('\n').forEach(function (line) {
+            const trimmed = line.trim();
+            if (!trimmed) return;
+            let normalized = trimmed;
+            if (normalized.indexOf(':') === -1) normalized = 'song:' + normalized;
+            if (!/^(song):\d{1,32}$/.test(normalized)) {
+                hasInvalid = true;
+                return;
+            }
+            if (!seen[normalized]) {
+                seen[normalized] = true;
+                ids.push(normalized);
+            }
+        });
+        return hasInvalid ? null : ids;
+    }
+
+    // ---- 槽位输入框读写：槽位数动态（songSlotLimit，来自 /api/me），后端仍是「每行一个 ID」的文本 ----
+    function getSongSlots() {
+        const values = [];
+        for (let i = 1; i <= songSlotLimit; i += 1) {
+            const el = document.getElementById('my-music-slot-' + i);
+            values.push(el ? String(el.value || '').trim() : '');
+        }
+        return values;
+    }
+
+    function songSlotsToText() {
+        return getSongSlots().filter(Boolean).join('\n');
+    }
+
+    function setSongSlots(text) {
+        const lines = String(text || '').split('\n').map(function (s) { return s.trim(); });
+        for (let i = 0; i < songSlotLimit; i += 1) {
+            const el = document.getElementById('my-music-slot-' + (i + 1));
+            if (el) el.value = lines[i] || '';
+        }
+    }
+
+    // 按 songSlotLimit 重新渲染槽位输入框；保留用户已填写的值，新增槽位以已保存歌单补位
+    function renderSongSlots() {
+        const container = document.getElementById('my-music-slots');
+        if (!container) return;
+        const savedText = GM_getValue('myMusicList', '');
+        const savedLines = String(savedText || '').split('\n').map(function (s) { return s.trim(); });
+        const oldValues = {};
+        for (let i = 1; i <= songSlotLimit; i += 1) {
+            const el = document.getElementById('my-music-slot-' + i);
+            oldValues[i] = el ? String(el.value || '').trim() : (savedLines[i - 1] || '');
+        }
+        container.innerHTML = '';
+        for (let i = 1; i <= songSlotLimit; i += 1) {
+            const input = document.createElement('input');
+            input.id = 'my-music-slot-' + i;
+            input.type = 'text';
+            input.placeholder = '槽位 ' + i;
+            input.value = oldValues[i] || '';
+            input.style.cssText = 'margin-bottom:4px;';
+            container.appendChild(input);
+        }
+    }
+
+    // 规范化后比较（已保存文本与 3 槽位文本做语义对比，忽略 song: 前缀/空行差异）
+    function normalizeSongsForCompare(text) {
+        const ids = parseSaveSongs(text);
+        return ids === null ? String(text || '').trim() : ids.join('\n');
+    }
+
     async function resolveMusics(musicIds) {
         const result = [];
         for (const m of musicIds) {
-            if (m.type === 'song') {
-                const durationMs = await fetchSongDuration(m.id);
-                if (durationMs > 0) {
-                    result.push({ musicId: `song:${m.id}`, musicMeta: { durationMs: durationMs } });
-                } else {
-                    // 单曲解析失败，尝试作为专辑
-                    const tracks = await fetchAlbumTracks(m.id);
-                    tracks.forEach(function (t) {
-                        result.push({ musicId: `song:${t.id}`, musicMeta: { durationMs: t.durationMs } });
-                    });
-                }
-            } else if (m.type === 'album') {
-                const tracks = await fetchAlbumTracks(m.id);
-                tracks.forEach(function (t) {
-                    result.push({ musicId: `song:${t.id}`, musicMeta: { durationMs: t.durationMs } });
-                });
+            if (m.type !== 'song') continue;
+            const durationMs = await fetchSongDuration(m.id);
+            // fetchSongDuration 内部已通过 fetchSongDetail 拿到歌曲名并写入缓存，这里直接读取
+            const cached = getCachedSongMeta('song:' + m.id);
+            const name = cached && cached.name ? cached.name : '';
+            if (durationMs > 0) {
+                result.push({ musicId: `song:${m.id}`, musicMeta: { durationMs: durationMs }, name: name });
             }
         }
         return result;
@@ -799,49 +888,84 @@
                 <div id="helper-header">
                     <span>🎵 互助面板 (${CURRENT_VERSION})</span>
                     <div style="display:flex; align-items:center; gap:8px;">
-                        <a id="header-update-link" style="display:none; font-size:10px; color:#d33; cursor:pointer;">更新脚本</a>
-                        <a id="portal-link" href="${getPortalUrl()}" style="font-size:10px; color:#1890ff; text-decoration:underline;">个人中心</a>
-                        <a id="logout-link" style="font-size:10px; color:#999; display:${token ? 'block' : 'none'}">退出</a>
-                        <span id="min-btn" style="cursor:pointer; color:#999;">—</span>
+                        <a id="header-update-link" style="display:none; font-size:12px; color:var(--brand); cursor:pointer;">更新脚本</a>
+                        <a id="portal-link" href="${getPortalUrl()}" target="_blank" rel="noopener noreferrer" style="font-size:12px; color:var(--link); text-decoration:underline;">个人中心</a>
+                        <a id="logout-link" style="font-size:12px; color:var(--text-muted); display:${token ? 'block' : 'none'}">退出</a>
+                        <span id="min-btn" style="cursor:pointer; color:var(--text-muted);">—</span>
                     </div>
                 </div>
                 <div id="helper-body">
-                    <div id="risk-notice" style="${riskAccepted ? 'display:none' : 'display:block'}; white-space:pre-line; font-size:11px; margin-bottom:8px; padding:8px; border-radius:4px; background:#fff7e6; border:1px solid #ffd591; color:#874d00; line-height:1.5;"></div>
-                    <button id="risk-accept-btn" style="${riskAccepted ? 'display:none' : 'display:block'}; width:100%; margin-bottom:8px; background:#176b5b; color:#fff; padding:8px; border:none; border-radius:6px; cursor:pointer;">我已阅读并确认</button>
-                    <div id="login-status" style="font-size:12px; margin-bottom:8px; color:#666;">${token ? '检测登录中...' : '未登录'}</div>
+                    <div id="risk-notice" style="${riskAccepted ? 'display:none' : 'display:block'}; white-space:pre-line; font-size:12px; margin-bottom:8px; padding:8px; border-radius:var(--radius); background:#fff7e6; border:1px solid #ffd591; color:var(--warn); line-height:1.5;"></div>
+                    <button id="risk-accept-btn" class="btn-primary" style="${riskAccepted ? 'display:none' : 'display:block'}; width:100%; margin-bottom:8px; padding:8px;">我已阅读并确认</button>
+                    <div id="login-status" style="font-size:12px; margin-bottom:8px; color:var(--text-secondary);">${token ? '检测登录中...' : '未登录'}</div>
                     <div id="auth-section" style="${token || !riskAccepted ? 'display:none' : 'display:block'}">
-                        <button id="login-linuxdo" style="background:#000; color:#fff; width:100%; padding:8px; border:none; border-radius:6px; cursor:pointer;">登录 Linux.do</button>
-                        <button id="update-script-btn" style="display:none; margin-top:8px; background:#d33; color:#fff; width:100%; padding:8px; border:none; border-radius:6px; cursor:pointer;">更新脚本</button>
+                        <button id="login-linuxdo" class="btn-primary" style="width:100%; padding:8px;">登录 Linux.do</button>
+                        <button id="update-script-btn" class="btn-primary" style="display:none; margin-top:8px; width:100%; padding:8px;">更新脚本</button>
                     </div>
                     <div id="helper-form" style="${token && riskAccepted ? 'display:block' : 'display:none'}">
                         <div style="margin-bottom:8px;">
-                            <div style="font-size:11px; color:#999; margin-bottom:4px;">音乐 ID（每行一个，如 song:123 或 album:456，也可直接填数字；留空=只帮别人不加入被助队列）</div>
-                            <textarea id="my-music-list" rows="3" style="width:100%; padding:4px; border:1px solid #ccc; border-radius:6px; box-sizing:border-box; font-size:12px;">${savedMusicList}</textarea>
+                            <div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">歌曲 ID（每槽一个，如 song:123 或纯数字；留空槽位=不挂载）</div>
+                            <div id="my-music-slots" style="margin-bottom:4px;"></div>
+                            <div id="slot-apply-section" style="margin-top:6px; font-size:12px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+                                <a id="slot-apply-link" style="color:var(--link); cursor:pointer; text-decoration:underline;">申请增加槽位</a>
+                                <span id="slot-apply-pending" style="display:none; color:var(--warn);">槽位申请审核中</span>
+                            </div>
+                            <div id="slot-apply-form" style="display:none; margin-top:6px;">
+                                <input id="slot-apply-count" type="number" min="1" max="10" placeholder="申请增加几个槽位（1~10）" style="margin-bottom:4px;">
+                                <textarea id="slot-apply-reason" placeholder="理由（必填）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:#fff; color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px; resize:vertical;"></textarea>
+                                <div style="display:flex; gap:8px;">
+                                    <button id="slot-apply-submit" class="btn-primary" style="flex:1; padding:6px;">提交申请</button>
+                                    <button id="slot-apply-cancel" style="flex:1; padding:6px; background:var(--bg-muted); color:var(--text-secondary);">取消</button>
+                                </div>
+                            </div>
                         </div>
                         <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
-                            <select id="my-preference" style="flex:1; padding:4px; border:1px solid #ccc; border-radius:6px; background:#f9f9f9; font-size:12px;">
+                            <select id="my-preference" style="flex:1; background:var(--bg-muted);">
                                 <option value="random" ${savedPreference === 'random' ? 'selected' : ''}>随机</option>
                                 <option value="short" ${savedPreference === 'short' ? 'selected' : ''}>短歌优先</option>
                                 <option value="long" ${savedPreference === 'long' ? 'selected' : ''}>长歌优先</option>
                             </select>
-                            <label style="display:flex; align-items:center; gap:4px; font-size:11px; color:#666; white-space:nowrap;">
+                            <label style="display:flex; align-items:center; gap:4px; font-size:12px; color:var(--text-secondary); white-space:nowrap;">
                                 <input type="checkbox" id="auto-start" ${autoStart === '1' ? 'checked' : ''}> 自动开启
                             </label>
                         </div>
-                        <button id="toggle-helper" style="width:100%; padding:8px; background:#d33; color:#fff; border:none; border-radius:6px; cursor:pointer;">开启互助</button>
+                        <div style="display:flex; gap:8px;">
+                            <button id="save-songs" class="btn-primary" style="flex:1; padding:8px;">保存</button>
+                            <button id="toggle-helper" class="btn-primary" style="flex:1; padding:8px;">开启互助</button>
+                        </div>
                     </div>
-                    <div id="helper-info" style="display:none; white-space:pre-line; font-size:11px; margin-top:8px; padding:8px; border-radius:4px; background:#f7f8fa; border:1px solid #d9dce1; color:#4a5568; line-height:1.5;">就绪...</div>
-                    <button id="manual-btn" style="display:none; width:100%; margin-top:8px; background:#d33; color:#fff; border:none; padding:8px; border-radius:6px; cursor:pointer; animation: blink 1s infinite;">点我激活播放</button>
+                    <div id="helper-stats" style="display:none; white-space:pre-line; font-size:12px; margin-top:8px; padding:8px; border-radius:var(--radius); background:var(--bg-soft); border:1px solid var(--line); color:var(--text-secondary); line-height:1.5;"></div>
+                    <div id="helper-info" style="display:none; white-space:pre-line; font-size:12px; margin-top:8px; padding:8px; border-radius:var(--radius); background:var(--bg-soft); border:1px solid var(--line); color:var(--text-secondary); line-height:1.5;">就绪...</div>
+                    <button id="manual-btn" class="btn-primary" style="display:none; width:100%; margin-top:8px; padding:8px; animation: blink 1s infinite;">点我激活播放</button>
                 </div>
             </div>
         `;
         document.body.appendChild(container);
+        renderSongSlots();
         GM_addStyle(`
-            #music-helper-container { --brand:#d33; --ok:#14804a; --bad:#d93025; --warn:#9a6700; --panel:#fff; --line:#dfe5ee; position: fixed; top: 100px; right: 20px; z-index: 1000000; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; user-select: none; }
-            #music-helper-panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.2); width: 220px; }
-            #helper-header { background: #f5f5f5; padding: 10px; display: flex; justify-content: space-between; align-items: center; border-radius: 8px 8px 0 0; cursor: move; }
+            #music-helper-container {
+                --brand:#c20c0c; --brand-hover:#9b0a0a; --ok:#14804a; --bad:#d93025; --warn:#9a6700;
+                --disabled:#999999; --panel:#ffffff; --line:#e3e8ef; --text:#333333;
+                --text-secondary:#666666; --text-muted:#999999; --link:#1890ff; --bg-muted:#f5f6f8; --bg-soft:#f7f8fa;
+                --radius:6px; --radius-lg:10px;
+                position: fixed; top: 100px; right: 20px; z-index: 1000000;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+                font-size: 12px; user-select: none;
+            }
+            #music-helper-panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: 0 8px 24px rgba(0,0,0,0.2); width: 220px; overflow: hidden; }
+            #helper-header { background: var(--bg-muted); padding: 10px; display: flex; justify-content: space-between; align-items: center; cursor: move; }
             #helper-body { padding: 12px; }
             #helper-toggle-btn { width: 44px; height: 44px; background: var(--brand); color: #fff; border-radius: 50%; display: none; align-items: center; justify-content: center; cursor: move; font-size: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+            #music-helper-container button { font-size: 12px; border: none; border-radius: var(--radius); cursor: pointer; transition: filter .15s ease, opacity .15s ease; }
+            #music-helper-container button:hover { filter: brightness(0.92); }
+            #music-helper-container button:active { filter: brightness(0.85); }
+            #music-helper-container button:disabled { opacity: .6; cursor: not-allowed; }
+            #music-helper-container .btn-primary { background: var(--brand); color: #fff; }
+            #music-helper-container input[type="text"], #music-helper-container select {
+                width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: var(--radius);
+                background: #fff; color: var(--text); font-size: 12px; padding: 5px 6px;
+            }
+            #music-helper-container input[type="text"]:focus, #music-helper-container select:focus { outline: none; border-color: var(--brand); }
             @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.4} }
         `);
 
@@ -881,9 +1005,36 @@
             location.reload();
         };
         document.getElementById('toggle-helper').onclick = toggleHelper;
-        document.getElementById('manual-btn').onclick = () => { triggerIframePlay(); document.getElementById('manual-btn').style.display='none'; };
-        document.getElementById('min-btn').onclick = () => { document.getElementById('music-helper-panel').style.display='none'; document.getElementById('helper-toggle-btn').style.display='flex'; };
+        document.getElementById('save-songs').onclick = saveSongs;
+        document.getElementById('slot-apply-link').onclick = () => {
+            if (pendingSlotApplication) return;
+            document.getElementById('slot-apply-form').style.display = 'block';
+        };
+        document.getElementById('slot-apply-cancel').onclick = () => {
+            document.getElementById('slot-apply-form').style.display = 'none';
+        };
+        document.getElementById('slot-apply-submit').onclick = submitSlotApplication;
+        document.getElementById('manual-btn').onclick = async () => {
+            const btn = document.getElementById('manual-btn');
+            btn.innerText = '正在尝试激活播放...';
+            btn.disabled = true;
+            triggerIframePlay();
+            await wait(1500);
+            btn.disabled = false;
+            const { cur, state } = getProgress();
+            if (state === 'play' && cur > 0) {
+                btn.style.display = 'none';
+            } else {
+                btn.innerText = '激活失败，点击重试';
+            }
+        };
+        document.getElementById('min-btn').onclick = () => {
+            document.getElementById('music-helper-panel').style.display='none';
+            document.getElementById('helper-toggle-btn').style.display='flex';
+            updateMinButtonState();
+        };
         document.getElementById('helper-toggle-btn').onclick = () => { if(!isDragging){ document.getElementById('music-helper-panel').style.display='block'; document.getElementById('helper-toggle-btn').style.display='none'; } };
+        updateMinButtonState();
 
         fetchConfig();
         if (token && ensureSingleTabLock()) refreshMe();
@@ -917,7 +1068,7 @@
                 renderAnnouncement(d && d.announcement);
                 if(d && d.latestVersion && compareVersions(d.latestVersion, CURRENT_VERSION) > 0) {
                     const up = document.createElement('div');
-                    up.innerHTML = `<div style="background:#fffbe6; border:1px solid #ffe58f; padding:8px; border-radius:4px; margin-bottom:8px; font-size:11px; color:#856404;">发现新版本 v${d.latestVersion}</div>`;
+                    up.innerHTML = `<div style="background:#fffbe6; border:1px solid #ffe58f; padding:8px; border-radius:var(--radius); margin-bottom:8px; font-size:12px; color:var(--warn);">发现新版本 v${d.latestVersion}</div>`;
                     document.getElementById('helper-body').prepend(up);
                     showUpdateButton(`更新到 v${d.latestVersion}`);
                 }
@@ -945,7 +1096,7 @@
         }
         const box = existing || document.createElement('div');
         box.id = 'helper-announcement';
-        box.style.cssText = 'white-space:pre-line;background:#fff7e6;border:1px solid #ffd591;padding:8px;border-radius:4px;margin-bottom:8px;font-size:11px;color:#874d00;line-height:1.5;';
+        box.style.cssText = 'white-space:pre-line;background:#fff7e6;border:1px solid #ffd591;padding:8px;border-radius:var(--radius);margin-bottom:8px;font-size:12px;color:var(--warn);line-height:1.5;';
         box.innerText = text;
         if (!existing) body.prepend(box);
     }
@@ -1050,7 +1201,7 @@
         const result = await requestAPI(method, path, body, token);
         const payload = result.payload;
         if(result.status===401){
-            if (allowRefreshRetry && token && payload && payload.error === 'token_expired') {
+            if (allowRefreshRetry && token && payload && (payload.error === 'token_expired' || payload.error === 'invalid_or_expired_token')) {
                 const refreshed = await refreshAccessToken(true);
                 if (refreshed) {
                     return callAPI(method, path, body, false);
@@ -1079,7 +1230,6 @@
         if (result.status === 0) {
             return null;
         }
-        if (payload && payload.stats) updateActivityStats(payload.stats);
         GM_setValue(ERROR_KEY, '');
         return payload;
     }
@@ -1109,11 +1259,33 @@
     }
 
     async function refreshMe() {
+        const loginStatus = document.getElementById('login-status');
         const d = await callAPI('GET', '/me');
         if (d && d.user) {
-            document.getElementById('login-status').innerText = `已登录: ${d.user.displayName}`;
+            if (loginStatus) {
+                loginStatus.innerText = `已登录: ${d.user.displayName}`;
+                loginStatus.style.cursor = '';
+                loginStatus.style.color = '';
+                loginStatus.onclick = null;
+            }
             updateParticipantInfo(d.participant);
-            const listEl = document.getElementById('my-music-list');
+            // 动态槽位上限：优先取 /api/me 下发的 song_slot_limit（user 或 participant 里都有），
+            // 变化时重新渲染槽位输入框（保留已填内容）。旧后端不下发时保持默认 3。
+            const newLimit = Number(
+                (d.user && d.user.song_slot_limit) ||
+                (d.participant && d.participant.song_slot_limit) ||
+                3,
+            );
+            if (newLimit >= 1 && newLimit !== songSlotLimit) {
+                songSlotLimit = newLimit;
+                renderSongSlots();
+            }
+            // 是否有待审核的槽位申请：有则隐藏「申请」入口，展示「槽位申请审核中」
+            pendingSlotApplication = !!d.pending_slot_application;
+            const pendingEl = document.getElementById('slot-apply-pending');
+            const linkEl = document.getElementById('slot-apply-link');
+            if (pendingEl) pendingEl.style.display = pendingSlotApplication ? 'block' : 'none';
+            if (linkEl) linkEl.style.display = pendingSlotApplication ? 'none' : 'block';
             // 优先从云端歌曲草稿同步（门户保存的原始 ID）
             const songsRes = await callAPI('GET', '/songs');
             if (songsRes && songsRes.status === 'pending') {
@@ -1125,98 +1297,90 @@
                     setHelperInfoStyle('warn');
                 }
             } else if (songsRes && songsRes.songs != null && String(songsRes.songs).trim()) {
-                if (listEl) {
-                    listEl.value = String(songsRes.songs);
-                    GM_setValue('myMusicList', String(songsRes.songs));
-                }
-            } else if (listEl && Array.isArray(d.musics) && d.musics.length > 0 && !(GM_getValue('myMusicList', '') || '').trim()) {
+                setSongSlots(String(songsRes.songs));
+                GM_setValue('myMusicList', String(songsRes.songs));
+            } else if (Array.isArray(d.musics) && d.musics.length > 0 && !(GM_getValue('myMusicList', '') || '').trim()) {
                 const lines = d.musics.map(function (m) { return m.musicId || ''; }).filter(Boolean);
                 if (lines.length > 0) {
-                    listEl.value = lines.join('\n');
-                    GM_setValue('myMusicList', listEl.value);
+                    setSongSlots(lines.join('\n'));
+                    GM_setValue('myMusicList', lines.join('\n'));
                 }
             }
+            return;
+        }
+        // 登录态获取失败（网络异常等），且无其他错误提示覆盖时：可点击重试
+        if (loginStatus && !d && loginStatus.innerText === '检测登录中...') {
+            loginStatus.innerText = '登录状态获取失败，点击重试';
+            loginStatus.style.cursor = 'pointer';
+            loginStatus.style.color = 'var(--bad)';
+            loginStatus.onclick = function () {
+                loginStatus.innerText = '检测登录中...';
+                loginStatus.style.cursor = '';
+                loginStatus.style.color = '';
+                refreshMe();
+            };
         }
     }
 
     function updateParticipantInfo(participant) {
         if (!participant) return;
-        const infoEl = document.getElementById('helper-info');
-        const credits = Number(participant.credits || 0);
+        const statsEl = document.getElementById('helper-stats');
+        const credits = Number(participant.available_credits != null ? participant.available_credits : participant.credits || 0);
         currentParticipantCredits = credits;
-        currentEarnedHelpStats = normalizeEarnedHelpStats(participant.earned_help_stats);
+        const todayReceived = Number(participant.today_received_help_count || 0);
+        const todayReceivedLimit = Number(participant.today_received_limit || 0);
+        const todayHelped = Number(participant.today_helped_count || 0);
+        const todayHelpedLimit = Number(participant.today_helped_limit || 200);
         const monthlyReceived = Number(participant.monthly_received_help_count || 0);
         const monthlyLimit = Number(participant.monthly_received_limit || 0);
-        const monthlyLine = monthlyLimit > 0
-            ? `本月被助: ${monthlyReceived} / ${monthlyLimit}${participant.monthly_cap_reached ? '（已封顶）' : ''}`
-            : '';
-        const todayHelped = Number(participant.today_helped_count || 0);
-        const todayReceived = Number(participant.today_received_help_count || 0);
-        const todayLimit = Number(participant.today_received_limit || 0);
-        const todayHelpedLine = `今日帮了: ${todayHelped} 次`;
-        const todayReceivedLine = todayLimit > 0
-            ? `今日被助: ${todayReceived} / ${todayLimit}`
-            : '';
-        const earnedLine = earnedHelpStatsLine();
-        if (infoEl && earnedLine) infoEl.title = earnedHelpStatsTooltip();
-        if (!isHelperRunning) {
-            infoEl.style.display = 'block';
-            const statsLine = activityStatsLine();
-            infoEl.innerText = `剩余可被互助额度: ${credits}${monthlyLine ? `\n${monthlyLine}` : ''}${todayHelpedLine ? `\n${todayHelpedLine}` : ''}${todayReceivedLine ? `\n${todayReceivedLine}` : ''}${earnedLine ? `\n${earnedLine}` : ''}${statsLine ? `\n${statsLine}` : ''}`;
+        const lines = [];
+        if (todayReceivedLimit > 0) lines.push(`今日被助: ${todayReceived} / ${todayReceivedLimit}`);
+        lines.push(`今日助力: ${todayHelped} / ${todayHelpedLimit}`);
+        if (monthlyLimit > 0) lines.push(`本月被助: ${monthlyReceived} / ${monthlyLimit}`);
+        lines.push(`可用额度: ${credits}`);
+        // 数据区常驻可见，运行时也不被「正在互助」文本覆盖
+        if (statsEl) {
+            statsEl.style.display = 'block';
+            statsEl.innerText = lines.join('\n');
         }
     }
 
-    // helper-info 状态色分层：空闲/正常=中性，运行中=绿色，错误/待审核=黄色。只改颜色不改文字。
+    // helper-info 状态色分层：空闲/正常=中性，运行中=绿色，保存成功=绿色，错误/待审核=黄色。只改颜色不改文字。
     function setHelperInfoStyle(kind) {
         const infoEl = document.getElementById('helper-info');
         if (!infoEl) return;
-        if (kind === 'running') {
+        if (kind === 'running' || kind === 'success') {
             infoEl.style.background = '#e8f5ee';
             infoEl.style.borderColor = '#bfe5cf';
-            infoEl.style.color = '#14804a';
+            infoEl.style.color = 'var(--ok)';
         } else if (kind === 'warn') {
             infoEl.style.background = '#fff7e6';
             infoEl.style.borderColor = '#ffd591';
-            infoEl.style.color = '#874d00';
+            infoEl.style.color = 'var(--warn)';
         } else {
-            infoEl.style.background = '#f7f8fa';
-            infoEl.style.borderColor = '#d9dce1';
-            infoEl.style.color = '#4a5568';
+            infoEl.style.background = 'var(--bg-soft)';
+            infoEl.style.borderColor = 'var(--line)';
+            infoEl.style.color = 'var(--text-secondary)';
         }
     }
 
-    function normalizeEarnedHelpStats(stats) {
-        if (!stats || typeof stats !== 'object') return null;
-        return {
-            today: Number(stats.today || 0),
-            month: Number(stats.month || 0),
-        };
+    // 在 helper-info 中显示一条状态文案（kind 同 setHelperInfoStyle）
+    function showHelperInfo(text, kind) {
+        const infoEl = document.getElementById('helper-info');
+        if (!infoEl) return;
+        infoEl.style.display = 'block';
+        infoEl.innerText = text;
+        setHelperInfoStyle(kind || 'neutral');
     }
 
-    function earnedHelpStatsLine() {
-        if (!currentEarnedHelpStats) return '';
-        return `获得互助(?)：今日 ${currentEarnedHelpStats.today}，本月 ${currentEarnedHelpStats.month}`;
-    }
-
-    function earnedHelpStatsTooltip() {
-        return '统计不一定 100% 准确，仅供参考。按服务端额度流水中的成功互助记录估算。';
-    }
-
-    function updateActivityStats(stats) {
-        if (!stats || typeof stats !== 'object') return;
-        activityStats = {
-            currentActiveUsers: Number(stats.currentActiveUsers || 0),
-            currentActiveWindowMin: Number(stats.currentActiveWindowMin || 0),
-            recentActiveUsers: Number(stats.recentActiveUsers || 0),
-            recentActiveWindowMin: Number(stats.recentActiveWindowMin || 0),
-            dailyActiveUsers: Number(stats.dailyActiveUsers || 0),
-        };
-    }
-
-    function activityStatsLine() {
-        if (!activityStats) return '';
-        const recentWindow = activityStats.recentActiveWindowMin || 30;
-        return `近${recentWindow}分钟活跃: ${activityStats.recentActiveUsers}\n今日活跃: ${activityStats.dailyActiveUsers}`;
+    // 最小化圆点按钮状态色：有新版本=黄，运行中=绿，否则=红（品牌色）
+    function updateMinButtonState() {
+        const btn = document.getElementById('helper-toggle-btn');
+        if (!btn) return;
+        let color = 'var(--brand)';
+        if (updateAvailable) color = 'var(--warn)';
+        else if (isHelperRunning) color = 'var(--ok)';
+        btn.style.background = color;
     }
 
     function noTargetReasonText(summary) {
@@ -1245,16 +1409,122 @@
         return `${reasonMap[reason] || '暂无可互助目标'}，30s 后重试\n${detail}`;
     }
 
+    // 「申请增加槽位」：弹简易表单（数字 + 理由必填）→ POST /api/slot-applications → 提示「已提交，待管理员审核」
+    async function submitSlotApplication() {
+        if (GM_getValue(RISK_ACCEPTED_KEY, '') !== '1') return;
+        if (upgradeRequired) return;
+        if (pendingSlotApplication) {
+            showHelperInfo('已有待审核的槽位申请，请等待管理员处理。', 'warn');
+            return;
+        }
+        const countInput = document.getElementById('slot-apply-count');
+        const reasonInput = document.getElementById('slot-apply-reason');
+        const requestedSlots = Number(countInput ? countInput.value : 0);
+        const reason = String(reasonInput ? reasonInput.value || '' : '').trim();
+        if (!Number.isInteger(requestedSlots) || requestedSlots < 1 || requestedSlots > 10) {
+            showHelperInfo('请填写申请增加的槽位数（1~10）。', 'warn');
+            return;
+        }
+        if (!reason) {
+            showHelperInfo('请填写申请理由。', 'warn');
+            return;
+        }
+        const d = await callAPI('POST', '/slot-applications', { requested_slots: requestedSlots, reason: reason });
+        if (!d) {
+            showHelperInfo('提交失败，请检查网络后重试。', 'warn');
+            return;
+        }
+        if (d.error) {
+            showHelperInfo(d.message || getPayloadErrorText(d, 'submit_failed'), 'warn');
+            return;
+        }
+        pendingSlotApplication = true;
+        const form = document.getElementById('slot-apply-form');
+        const pendingEl = document.getElementById('slot-apply-pending');
+        const linkEl = document.getElementById('slot-apply-link');
+        if (form) form.style.display = 'none';
+        if (pendingEl) pendingEl.style.display = 'block';
+        if (linkEl) linkEl.style.display = 'none';
+        showHelperInfo(d.message || '已提交，待管理员审核。', 'warn');
+    }
+
+    // 「保存歌曲」：本地校验（去重 / 数量 ≤ songSlotLimit / 格式）→ 删歌确认 → POST /songs
+    // 按服务端返回的 status 提示：approved=已保存；pending=已提交审核，待管理员审核
+    // 返回 null 表示未保存成功（校验失败/删歌取消/网络或服务端错误）；成功时返回规范化文本
+    async function saveSongs() {
+        if (GM_getValue(RISK_ACCEPTED_KEY, '') !== '1') return null;
+        if (upgradeRequired) return null;
+        const rawText = songSlotsToText();
+        const slotLines = rawText.split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+        if (slotLines.some(function (line) { return line.indexOf('album:') === 0; })) {
+            showHelperInfo('暂不支持专辑，仅支持单曲。', 'warn');
+            return null;
+        }
+        const ids = parseSaveSongs(rawText);
+        if (ids === null) {
+            showHelperInfo('歌曲 ID 格式不正确，应为 song:数字 或纯数字，每槽一个。', 'warn');
+            return null;
+        }
+        if (ids.length > songSlotLimit) {
+            showHelperInfo('最多只能保存 ' + songSlotLimit + ' 首歌曲。', 'warn');
+            return null;
+        }
+        // 删歌确认：旧列表有、新列表没有 → 确认后才提交
+        const oldIds = parseSaveSongs(GM_getValue('myMusicList', ''));
+        if (oldIds !== null) {
+            const removed = oldIds.filter(function (id) { return ids.indexOf(id) === -1; });
+            if (removed.length > 0 && !window.confirm('确认提交删除？\n以下歌曲将从被助列表中移除：\n' + removed.join('\n'))) {
+                return null;
+            }
+        }
+        const savedText = ids.join('\n');
+        const d = await callAPI('POST', '/songs', { songs: savedText });
+        if (!d) {
+            showHelperInfo('保存失败，请检查网络后重试。', 'warn');
+            return null;
+        }
+        if (d.error) {
+            showHelperInfo(d.message || getPayloadErrorText(d, 'save_failed'), 'warn');
+            return null;
+        }
+        GM_setValue('myMusicList', savedText);
+        setSongSlots(savedText);
+        if (d.status === 'pending') {
+            showHelperInfo(d.message || '已提交审核，待管理员审核。', 'warn');
+        } else {
+            showHelperInfo(d.message || '已保存。', 'success');
+        }
+        return savedText;
+    }
+
     async function toggleHelper() {
         if (GM_getValue(RISK_ACCEPTED_KEY, '') !== '1') return;
         if (upgradeRequired) return;
-        const listText = document.getElementById('my-music-list').value.trim();
+        if (isHelperRunning) {
+            // 手动停止互助：同步取消「自动开启」，避免下次刷新自动复活
+            const autoStartEl = document.getElementById('auto-start');
+            if (autoStartEl) autoStartEl.checked = false;
+            GM_setValue('autoStart', '0');
+            stopHelper();
+            return;
+        }
+        let listText = songSlotsToText();
         const preference = document.getElementById('my-preference').value;
+        // 开启前对比 3 槽位与已保存列表：有未保存改动则询问是否先保存
+        if (normalizeSongsForCompare(listText) !== normalizeSongsForCompare(GM_getValue('myMusicList', ''))) {
+            if (window.confirm('改动尚未保存，是否先保存？')) {
+                const saved = await saveSongs();
+                if (saved === null) return; // 保存失败/被取消，不开启
+                listText = saved; // 用规范化后的文本
+            }
+        }
         const musicIds = parseMusicIds(listText);
         GM_setValue('myMusicList', listText);
         GM_setValue('myPreference', preference);
         GM_setValue('autoStart', document.getElementById('auto-start').checked ? '1' : '0');
-        if (isHelperRunning) stopHelper(); else await startHelper(musicIds, preference);
+        // 用户手动开启互助，视为可能修改了歌单：先清掉这些歌曲的解析缓存，重新从网易云解析
+        invalidateSongMetaList(musicIds);
+        await startHelper(musicIds, preference);
     }
 
     function stopHelper() {
@@ -1267,21 +1537,24 @@
         const helperInfo = document.getElementById('helper-info');
         if (toggleButton) {
             toggleButton.innerText = '开启互助';
-            toggleButton.style.background = '#d33';
+            toggleButton.style.background = 'var(--brand)';
+            toggleButton.disabled = false;
         }
         if (helperInfo) {
             helperInfo.innerText = '已停止本机互助播放；已保存的歌曲仍会按剩余额度被其他人互助。';
         }
         setHelperInfoStyle('neutral');
+        updateMinButtonState();
     }
 
     async function startHelper(musicIds, preference) {
         isHelperRunning = true;
         activeJoinState = { musicIds: musicIds, musics: null, preference: preference };
         document.getElementById('toggle-helper').innerText = '停止互助';
-        document.getElementById('toggle-helper').style.background = '#666';
+        document.getElementById('toggle-helper').style.background = 'var(--ok)';
         document.getElementById('helper-info').style.display = 'block';
         setHelperInfoStyle('running');
+        updateMinButtonState();
         const startHint = autoStartTriggered ? '已自动开启互助\n' : '';
         autoStartTriggered = false;
         document.getElementById('helper-info').innerText = startHint + '正在加入互助队列...';
@@ -1324,9 +1597,19 @@
         return d;
     }
 
-    async function finishCurrentJob(jobId, playedMs, positionMs, durationMs) {
+    async function finishCurrentJob(jobId, playedMs, positionMs, durationMs, evidence) {
         if (!jobId) return null;
-        return callAPI('POST', '/play/finish', { jobId, playedMs, positionMs, durationMs });
+        const payload = { jobId, playedMs, positionMs, durationMs };
+        if (evidence) {
+            // 反作弊信号：monitorTick 里已算好的播放行为证据，字段名保持 camelCase。
+            payload.playbackRate = Number(evidence.playbackRate) || 0;
+            payload.jumpCount = Number(evidence.jumpCount) || 0;
+            payload.backwardJumpCount = Number(evidence.backwardJumpCount) || 0;
+            payload.listenDriftMs = Number(evidence.listenDriftMs) || 0;
+            payload.recoveryAttempts = Number(evidence.recoveryAttempts) || 0;
+            payload.stallDetected = !!evidence.stallDetected;
+        }
+        return callAPI('POST', '/play/finish', payload);
     }
 
     async function playNext() {
@@ -1359,41 +1642,50 @@
             const jobId = data.jobId;
             const creditCost = Number(data.creditCost || 1);
             const expectedDurationMs = Number(data.targetDurationMs || 0);
-            try { const p = getSafePlayer(); if(p && p.stop) p.stop(); } catch(e) {}
-            if (type === 'album') {
-                infoEl.innerText = `正在从专辑随机选歌...\n目标: ${data.owner && data.owner.displayName ? data.owner.displayName : '互助用户'}`;
-                const randomSongId = await resolveAlbumSongId(id);
-                if (!isHelperRunning) {
-                    await idleCleanupPlaybackBestEffort();
-                    return;
-                }
-                if (!randomSongId) {
-                    infoEl.innerText = '专辑歌曲读取失败，稍后重试';
-                    setTimeout(playNext, 5000);
-                    return;
-                }
-                type = 'song';
-                id = randomSongId;
-                infoEl.innerText = `已从专辑中随机选中一首歌\n正在跳转...`;
-            } else {
-                infoEl.innerText = `正在跳转...\n目标: ${data.owner && data.owner.displayName ? data.owner.displayName : '互助用户'}`;
-            }
-
-            const expectedSongId = String(id);
-            const forcePlayed = await prepareTargetPlayback(expectedSongId);
-            if (!isHelperRunning) {
-                await idleCleanupPlaybackBestEffort();
-                return;
-            }
-            if (!forcePlayed) {
-                infoEl.innerText = `目标歌曲加载失败，准备重试...\n目标歌曲: ${expectedSongId}`;
-                setTimeout(playNext, 3000);
-                return;
-            }
+            // 播放状态变量提前声明，供「失败主动放弃」与后续监控共用
             let startTime = Date.now(), hasTriggered = false, finished = false;
             let prevCur = 0, prevDur = 0, prevTickAt = 0, localListenedMs = 0, suspiciousJumps = 0, cleanTicks = 0;
             let mismatchTicks = 0, lastRetargetAt = 0, retargeting = false, recoveryAttempts = 0;
             let lastHeartbeatAt = 0;
+            let lastCurMoveAt = 0, lastStallCur = 0;
+            // 反作弊证据（finish 时随 /play/finish 上报服务端，字段名见 finishCurrentJob）：
+            // 回退次数、观察到的最大倍速、是否判定卡死过、最后一次进度与有效播放漂移。
+            let backwardJumps = 0, maxPlaybackRate = 0, stallDetected = false, lastDriftMs = 0;
+            const abandonCurrentJob = async (reason, fallbackMs = 3000) => {
+                // 主动上报失败并放弃当前任务：成功后立即释放本单并继续下一单；
+                // 上报失败/超时则回退到原来的延时重试逻辑，等服务端懒清扫判过期。
+                finished = true;
+                clearInterval(monitorTimer);
+                infoEl.innerText = `目标歌曲播放失败，正在上报并放弃当前任务...\n原因: ${reason}`;
+                let result = null;
+                try {
+                    result = await callAPI('POST', '/play/abandon', { jobId: jobId, reason: reason });
+                } catch (e) {
+                    result = null;
+                }
+                if (result && result.ok) {
+                    infoEl.innerText = `已主动放弃当前任务（${reason}），继续下一单...`;
+                    playNext();
+                } else {
+                    infoEl.innerText = `目标歌曲播放失败，准备重试...\n原因: ${reason}`;
+                    setTimeout(playNext, fallbackMs);
+                }
+            };
+            try { const p = getSafePlayer(); if(p && p.stop) p.stop(); } catch(e) {}
+            infoEl.innerText = `正在跳转...\n目标: ${data.owner && data.owner.displayName ? data.owner.displayName : '互助用户'}`;
+
+            const expectedSongId = String(id);
+            const playbackError = await prepareTargetPlayback(expectedSongId);
+            if (!isHelperRunning) {
+                await idleCleanupPlaybackBestEffort();
+                return;
+            }
+            if (playbackError) {
+                // 播放失败（歌不可播 / 加载或播放按钮没生效）：清掉该歌曲的可播/时长缓存，下次遇到时重新解析，并主动上报失败放弃当前任务
+                invalidateSongMeta('song:' + expectedSongId);
+                await abandonCurrentJob(playbackError, 3000);
+                return;
+            }
             const resetPlaybackAccounting = () => {
                 startTime = Date.now();
                 hasTriggered = false;
@@ -1404,19 +1696,27 @@
                 suspiciousJumps = 0;
                 cleanTicks = 0;
                 mismatchTicks = 0;
+                lastCurMoveAt = 0;
+                lastStallCur = 0;
             };
             const recoverTargetPlayback = async (reason) => {
-                if (retargeting || recoveryAttempts >= 3) return false;
+                if (retargeting) return false;
+                if (recoveryAttempts >= 3) {
+                    // 已重试 3 次仍无法恢复：主动上报失败并放弃当前任务
+                    await abandonCurrentJob('load_failed', 3000);
+                    return false;
+                }
                 recoveryAttempts += 1;
                 retargeting = true;
                 clearInterval(monitorTimer);
                 infoEl.innerText = `播放状态异常，正在重新初始化...\n原因: ${reason}\n目标歌曲: ${expectedSongId}`;
-                const ok = await prepareTargetPlayback(expectedSongId);
+                const playbackError = await prepareTargetPlayback(expectedSongId);
                 resetPlaybackAccounting();
                 retargeting = false;
-                if (!ok) {
-                    finished = true;
-                    setTimeout(playNext, 3000);
+                if (playbackError) {
+                    // 恢复播放失败：主动上报失败并放弃当前任务
+                    invalidateSongMeta('song:' + expectedSongId);
+                    await abandonCurrentJob(playbackError, 3000);
                     return false;
                 }
                 monitorTimer = setInterval(monitorTick, 1000);
@@ -1427,12 +1727,21 @@
                 clearInterval(monitorTimer);
                 try { const p = getSafePlayer(); if(p && p.stop) p.stop(); } catch(e) {}
                 infoEl.innerText = `正在提交助力结果...\n有效播放: ${formatTime(playedMs)} / ${formatTime(requiredListenMs)}`;
+                // 汇总本次任务的播放行为证据，随 /play/finish 上报服务端反作弊。
+                const evidence = {
+                    playbackRate: maxPlaybackRate,
+                    jumpCount: suspiciousJumps,
+                    backwardJumpCount: backwardJumps,
+                    listenDriftMs: lastDriftMs,
+                    recoveryAttempts: recoveryAttempts,
+                    stallDetected: stallDetected,
+                };
                 // 对同一个 jobId 的 /play/finish 做有限次重试（初始 1 次 + 最多 2 次重试），
                 // 网络/服务端失败时不作废本次有效播放。finished=true 已在首个 await 前同步置位，
                 // 重试期间 monitorTick 不会重复触发完成。
                 let result = null;
                 for (let attempt = 0; attempt <= 2; attempt += 1) {
-                    result = await finishCurrentJob(jobId, playedMs, positionMs, durationMs);
+                    result = await finishCurrentJob(jobId, playedMs, positionMs, durationMs, evidence);
                     if (result && result.ok) break;
                     if (attempt < 2) {
                         infoEl.innerText = `助力提交失败，正在重试 (${attempt + 1}/2)...\n有效播放: ${formatTime(playedMs)} / ${formatTime(requiredListenMs)}`;
@@ -1445,11 +1754,9 @@
                     const earnedCredits = Number(result.creditCost || creditCost || 0);
                     if (result.participant) updateParticipantInfo(result.participant);
                     infoEl.style.display = 'block';
-                    const earnedLine = earnedHelpStatsLine();
-                    if (earnedLine) infoEl.title = earnedHelpStatsTooltip();
                     infoEl.innerText = credited
-                        ? `助力成功\n本次获得额度: ${earnedCredits}${credits === null ? '' : `\n当前剩余额度: ${credits}`}${earnedLine ? `\n${earnedLine}` : ''}`
-                        : `任务已提交过\n本次未重复增加额度${credits === null ? '' : `\n当前剩余额度: ${credits}`}${earnedLine ? `\n${earnedLine}` : ''}`;
+                        ? `助力成功\n本次获得额度: ${earnedCredits}${credits === null ? '' : `\n当前剩余额度: ${credits}`}`
+                        : `任务已提交过\n本次未重复增加额度${credits === null ? '' : `\n当前剩余额度: ${credits}`}`;
                     setTimeout(playNext, 2500);
                     return;
                 }
@@ -1477,7 +1784,22 @@
                     lastHeartbeatAt = now;
                     requestAPI('POST', '/play/heartbeat', { jobId: jobId, positionMs: Math.floor(cur) });
                 }
+                // 播放中进度长时间不动（VIP 试听卡死等）：state='play' 但进度超过 PLAYBACK_STALL_MS 未前移，判定卡死主动放弃
+                if (state === 'play' && dur > 0) {
+                    if (lastCurMoveAt === 0) {
+                        lastCurMoveAt = now;
+                        lastStallCur = cur;
+                    } else if (cur !== lastStallCur) {
+                        lastStallCur = cur;
+                        lastCurMoveAt = now;
+                    } else if (now - lastCurMoveAt >= PLAYBACK_STALL_MS) {
+                        stallDetected = true;
+                        await abandonCurrentJob('playback_stalled', 3000);
+                        return;
+                    }
+                }
                 const playbackRate = getPlaybackRate();
+                if (playbackRate > maxPlaybackRate) maxPlaybackRate = playbackRate;
                 const playbackRateInvalid = state === 'play' && playbackRate > 1.05;
                 const effectiveDur = dur > 0 ? dur : prevDur;
                 const effectiveCur = cur > 0 ? cur : prevCur;
@@ -1503,6 +1825,7 @@
                     && currentPlayingSongId !== expectedSongId
                     && (hashMismatch || durationMismatch);
                 const progressListenDrift = effectiveCur > 0 ? effectiveCur - earlyDisplayListenedMs : 0;
+                lastDriftMs = progressListenDrift;
                 const queuePolluted = getQueueCount() > 1;
                 const progressPolluted = state === 'play'
                     && effectiveCur > 30000
@@ -1522,9 +1845,9 @@
                         return;
                     }
                     if (mismatchTicks >= 12) {
-                        finished = true;
-                        clearInterval(monitorTimer);
-                        setTimeout(playNext, 3000);
+                        // 任务歌曲持续不一致、重试也无法恢复：主动上报失败并放弃当前任务
+                        await abandonCurrentJob('load_failed', 3000);
+                        return;
                     }
                     prevCur = 0;
                     prevDur = 0;
@@ -1557,6 +1880,7 @@
                         }
                     } else if (prevCur - cur > 15000) {
                         suspiciousJumps += 1;
+                        backwardJumps += 1;
                         jumped = true;
                     }
                     // 正常连续播放（无跳变、进度推进、1x 速率）超过 10 个 tick 后衰减一次可疑跳变计数，
@@ -1580,15 +1904,11 @@
                 if (dur > 0) {
                     document.getElementById('manual-btn').style.display = 'none';
                     const requiredListenMs = serverRequiredListenMs > 0 ? serverRequiredListenMs : Math.ceil(dur * requiredListenRatio);
-                    const isAlbumSource = String(sourceMusicId).startsWith('album:');
                     const speedWarning = playbackRateInvalid ? '\n检测到倍速播放，请恢复 1x 后继续' : '';
                     const displayDurationMs = expectedDurationMs > 0 ? expectedDurationMs : dur;
                     const displayListenedMs = displayDurationMs > 0 ? Math.min(localListenedMs, displayDurationMs) : localListenedMs;
                     const currentCreditsLine = currentParticipantCredits === null ? '' : `\n当前剩余额度: ${currentParticipantCredits}`;
-                    const earnedLine = earnedHelpStatsLine();
-                    const statsLine = activityStatsLine();
-                    if (earnedLine) infoEl.title = earnedHelpStatsTooltip();
-                    infoEl.innerText = `正在互助 [${isAlbumSource ? '专辑随机单曲' : '单曲'}]\n歌曲时长: ${formatTime(displayDurationMs)}\n当前进度: ${formatTime(cur)}\n有效播放: ${formatTime(displayListenedMs)} / ${formatTime(requiredListenMs)}\n本次完成可得额度: ${creditCost}${currentCreditsLine}${earnedLine ? `\n${earnedLine}` : ''}${statsLine ? `\n${statsLine}` : ''}${speedWarning}`;
+                    infoEl.innerText = `正在互助 [单曲]\n歌曲时长: ${formatTime(displayDurationMs)}\n当前进度: ${formatTime(cur)}\n有效播放: ${formatTime(displayListenedMs)} / ${formatTime(requiredListenMs)}\n本次完成可得额度: ${creditCost}${currentCreditsLine}${speedWarning}`;
 
                     const listenFinishToleranceMs = 5000;
                     const enoughSongListen = displayListenedMs + listenFinishToleranceMs >= requiredListenMs;
