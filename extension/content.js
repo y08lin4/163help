@@ -97,7 +97,13 @@ function GM_xmlhttpRequest(options) {
     if (window.self !== window.top) return;
 
     const API_BASE = 'https://163music.linyu.qzz.io/api';
-    const CURRENT_VERSION = '4.0.13';
+    const SIGN_VERSION = '4.0.14'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
+    const LEGACY_VERSION = '4.0.13';
+    // HMAC 签名防重放（V4.0.14 引入）：只有能计算签名（crypto.subtle 可用）时才宣告
+    // 新版本并携带 X-Timestamp/X-Nonce/X-Signature；不能算就保持旧版本号，服务端按
+    // 旧版路径跳过签名校验，避免 403。
+    const CAN_SIGN = typeof crypto !== 'undefined' && !!crypto.subtle;
+    const CURRENT_VERSION = CAN_SIGN ? SIGN_VERSION : LEGACY_VERSION;
     const IS_EXTENSION = true;
     const EXTENSION_UPGRADE_PAGE_URL = 'https://163music.linyu.qzz.io/extension-upgrade.html';
     const UPDATE_FALLBACK_URL = 'https://163music.linyu.qzz.io/music-help.user.js';
@@ -123,6 +129,7 @@ function GM_xmlhttpRequest(options) {
     const PLAYBACK_STALL_MS = 40000; // 播放中进度持续不动（VIP 试听卡死等）判定的阈值，40 秒
     let songSlotLimit = 3; // 当前用户可挂歌槽位数（动态，来自 /api/me 的 song_slot_limit，默认 3）
     let pendingSlotApplication = false; // 是否存在待审核的槽位申请
+    let pendingLimitApplication = false; // 是否存在待审核的限额提升申请
 
     let isHelperRunning = false;
     let monitorTimer = null;
@@ -998,6 +1005,20 @@ function GM_xmlhttpRequest(options) {
                                     <button id="slot-apply-cancel" style="flex:1; padding:6px; background:var(--bg-muted); color:var(--text-secondary);">取消</button>
                                 </div>
                             </div>
+                            <div id="limit-apply-section" style="margin-top:6px; font-size:12px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+                                <a id="limit-apply-link" style="color:var(--link); cursor:pointer; text-decoration:underline;">申请提升限额</a>
+                                <span id="limit-apply-pending" style="display:none; color:var(--warn);">限额申请审核中</span>
+                            </div>
+                            <div id="limit-apply-form" style="display:none; margin-top:6px;">
+                                <input id="limit-apply-daily" type="number" min="1" max="999" placeholder="每日被助上限（1~999）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:#fff; color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px;">
+                                <input id="limit-apply-monthly" type="number" min="1" max="99999" placeholder="每月被助上限（1~99999）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:#fff; color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px;">
+                                <input id="limit-apply-url" type="text" placeholder="网易云主页链接（必填，http/https）" style="margin-bottom:4px;">
+                                <textarea id="limit-apply-reason" placeholder="理由（必填）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:#fff; color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px; resize:vertical;"></textarea>
+                                <div style="display:flex; gap:8px;">
+                                    <button id="limit-apply-submit" class="btn-primary" style="flex:1; padding:6px;">提交申请</button>
+                                    <button id="limit-apply-cancel" style="flex:1; padding:6px; background:var(--bg-muted); color:var(--text-secondary);">取消</button>
+                                </div>
+                            </div>
                         </div>
                         <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
                             <select id="my-preference" style="flex:1; background:var(--bg-muted);">
@@ -1094,6 +1115,14 @@ function GM_xmlhttpRequest(options) {
             document.getElementById('slot-apply-form').style.display = 'none';
         };
         document.getElementById('slot-apply-submit').onclick = submitSlotApplication;
+        document.getElementById('limit-apply-link').onclick = () => {
+            if (pendingLimitApplication) return;
+            document.getElementById('limit-apply-form').style.display = 'block';
+        };
+        document.getElementById('limit-apply-cancel').onclick = () => {
+            document.getElementById('limit-apply-form').style.display = 'none';
+        };
+        document.getElementById('limit-apply-submit').onclick = submitLimitApplication;
         document.getElementById('manual-btn').onclick = async () => {
             const btn = document.getElementById('manual-btn');
             btn.innerText = '正在尝试激活播放...';
@@ -1217,10 +1246,63 @@ function GM_xmlhttpRequest(options) {
         return expiresAt > 0 && now >= expiresAt - TOKEN_REFRESH_SKEW_MS;
     }
 
+    /* —— HMAC 签名防重放（V4.0.14）——
+     * 签名密钥 = 会话 access token（raw token，与 Authorization: Bearer 一致）；
+     * 签名消息 = METHOD + "\n" + path(含 query) + "\n" + timestamp + "\n" + nonce + "\n" + body；
+     * 算法 = HMAC-SHA256，输出小写 hex；通过 X-Timestamp/X-Nonce/X-Signature 三个请求头发送。
+     * 与服务端 hmac.go 的 verifyRequestSignature 严格对称。
+     */
+    function generateNonce() {
+        const bytes = new Uint8Array(16);
+        if (window.crypto && typeof window.crypto.getRandomValues === 'function') {
+            window.crypto.getRandomValues(bytes);
+            let out = '';
+            for (let i = 0; i < bytes.length; i++) out += bytes[i].toString(16).padStart(2, '0');
+            return out;
+        }
+        let out = '';
+        for (let i = 0; i < 16; i++) out += Math.floor(Math.random() * 16).toString(16);
+        return out;
+    }
+
+    // 计算签名三件套；无法计算（无 crypto.subtle / 无 token / 异常）时返回 {}（降级不签名）。
+    async function buildSignHeaders(method, fullUrl, rawBody, token) {
+        if (!CAN_SIGN || !token) return {};
+        try {
+            const u = new URL(fullUrl, window.location.href);
+            const path = u.pathname + u.search; // path + query，与服务端 r.URL.RequestURI() 一致
+            const timestamp = String(Math.floor(Date.now() / 1000));
+            const nonce = generateNonce();
+            const msg = [method, path, timestamp, nonce, rawBody || ''].join('\n');
+            const key = await crypto.subtle.importKey(
+                'raw',
+                new TextEncoder().encode(token),
+                { name: 'HMAC', hash: 'SHA-256' },
+                false,
+                ['sign'],
+            );
+            const sigBuf = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(msg));
+            const sigBytes = new Uint8Array(sigBuf);
+            let signature = '';
+            for (let i = 0; i < sigBytes.length; i++) signature += sigBytes[i].toString(16).padStart(2, '0');
+            return { 'X-Timestamp': timestamp, 'X-Nonce': nonce, 'X-Signature': signature };
+        } catch (e) {
+            return {};
+        }
+    }
+
     async function requestAPI(method, path, body = null, token = GM_getValue(TOKEN_KEY, '')) {
+        const rawBody = body ? JSON.stringify(body) : '';
+        const url = `${API_BASE}${path}`;
+        const headers = { 'Authorization':`Bearer ${token}`,'Content-Type':'application/json' };
+        const signHeaders = await buildSignHeaders(method, url, rawBody, token);
+        // 关键：版本号必须与「是否实际带上了签名」一致 —— 能签名才宣告 4.0.14，
+        // 否则回退旧版本号走服务端旧版路径（跳过签名校验），避免 403。
+        headers['X-Music-Helper-Version'] = signHeaders['X-Signature'] ? SIGN_VERSION : LEGACY_VERSION;
+        Object.assign(headers, signHeaders);
         return new Promise(r => GM_xmlhttpRequest({
-            method, url:`${API_BASE}${path}`, headers:{'Authorization':`Bearer ${token}`,'Content-Type':'application/json','X-Music-Helper-Version': CURRENT_VERSION},
-            data: body?JSON.stringify(body):null,
+            method, url, headers,
+            data: rawBody !== '' ? rawBody : null,
             timeout: 15000,
             onload: res => r({ status: res.status, payload: safeJSON(res.responseText) }),
             onerror:()=>r({ status: 0, payload: null }),
@@ -1366,6 +1448,12 @@ function GM_xmlhttpRequest(options) {
             const linkEl = document.getElementById('slot-apply-link');
             if (pendingEl) pendingEl.style.display = pendingSlotApplication ? 'block' : 'none';
             if (linkEl) linkEl.style.display = pendingSlotApplication ? 'none' : 'block';
+            // 是否有待审核的限额提升申请：有则隐藏「申请」入口，展示「限额申请审核中」
+            pendingLimitApplication = !!d.pending_limit_application;
+            const limitPendingEl = document.getElementById('limit-apply-pending');
+            const limitLinkEl = document.getElementById('limit-apply-link');
+            if (limitPendingEl) limitPendingEl.style.display = pendingLimitApplication ? 'block' : 'none';
+            if (limitLinkEl) limitLinkEl.style.display = pendingLimitApplication ? 'none' : 'block';
             // 优先从云端歌曲草稿同步（门户保存的原始 ID）
             const songsRes = await callAPI('GET', '/songs');
             if (songsRes && songsRes.status === 'pending') {
@@ -1522,6 +1610,63 @@ function GM_xmlhttpRequest(options) {
         const form = document.getElementById('slot-apply-form');
         const pendingEl = document.getElementById('slot-apply-pending');
         const linkEl = document.getElementById('slot-apply-link');
+        if (form) form.style.display = 'none';
+        if (pendingEl) pendingEl.style.display = 'block';
+        if (linkEl) linkEl.style.display = 'none';
+        showHelperInfo(d.message || '已提交，待管理员审核。', 'warn');
+    }
+
+    // 「申请提升限额」：弹简易表单（每日/每月上限 + 网易云主页 + 理由）→
+    // POST /api/limit-applications → 提示「已提交，待管理员审核」/ 已有 pending 时提示
+    async function submitLimitApplication() {
+        if (GM_getValue(RISK_ACCEPTED_KEY, '') !== '1') return;
+        if (upgradeRequired) return;
+        if (pendingLimitApplication) {
+            showHelperInfo('已有待审核的限额申请，请等待管理员处理。', 'warn');
+            return;
+        }
+        const dailyInput = document.getElementById('limit-apply-daily');
+        const monthlyInput = document.getElementById('limit-apply-monthly');
+        const urlInput = document.getElementById('limit-apply-url');
+        const reasonInput = document.getElementById('limit-apply-reason');
+        const daily = Number(dailyInput ? dailyInput.value : 0);
+        const monthly = Number(monthlyInput ? monthlyInput.value : 0);
+        const neteaseUrl = String(urlInput ? urlInput.value || '' : '').trim();
+        const reason = String(reasonInput ? reasonInput.value || '' : '').trim();
+        if (!Number.isInteger(daily) || daily < 1 || daily > 999) {
+            showHelperInfo('请填写每日被助上限（1~999）。', 'warn');
+            return;
+        }
+        if (!Number.isInteger(monthly) || monthly < 1 || monthly > 99999) {
+            showHelperInfo('请填写每月被助上限（1~99999）。', 'warn');
+            return;
+        }
+        if (!/^https?:\/\/\S+$/i.test(neteaseUrl)) {
+            showHelperInfo('请填写合法的网易云主页链接（http/https）。', 'warn');
+            return;
+        }
+        if (!reason) {
+            showHelperInfo('请填写申请理由。', 'warn');
+            return;
+        }
+        const d = await callAPI('POST', '/limit-applications', {
+            requested_daily_limit: daily,
+            requested_monthly_limit: monthly,
+            netease_url: neteaseUrl,
+            reason: reason
+        });
+        if (!d) {
+            showHelperInfo('提交失败，请检查网络后重试。', 'warn');
+            return;
+        }
+        if (d.error) {
+            showHelperInfo(d.message || getPayloadErrorText(d, 'submit_failed'), 'warn');
+            return;
+        }
+        pendingLimitApplication = true;
+        const form = document.getElementById('limit-apply-form');
+        const pendingEl = document.getElementById('limit-apply-pending');
+        const linkEl = document.getElementById('limit-apply-link');
         if (form) form.style.display = 'none';
         if (pendingEl) pendingEl.style.display = 'block';
         if (linkEl) linkEl.style.display = 'none';
