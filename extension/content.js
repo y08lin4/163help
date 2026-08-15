@@ -97,7 +97,7 @@ function GM_xmlhttpRequest(options) {
     if (window.self !== window.top) return;
 
     const API_BASE = 'https://163music.linyu.qzz.io/api';
-    const SIGN_VERSION = '4.0.14'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
+    const SIGN_VERSION = '4.0.15'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
     const LEGACY_VERSION = '4.0.13';
     // HMAC 签名防重放（V4.0.14 引入）：只有能计算签名（crypto.subtle 可用）时才宣告
     // 新版本并携带 X-Timestamp/X-Nonce/X-Signature；不能算就保持旧版本号，服务端按
@@ -1171,7 +1171,7 @@ function GM_xmlhttpRequest(options) {
         return new Promise(r => GM_xmlhttpRequest({
             method:'GET',
             url:`${API_BASE}/auth-config`,
-            headers:{'X-Music-Helper-Version': CURRENT_VERSION},
+            headers:{'X-Music-Helper-Version': CURRENT_VERSION, 'X-Client-Type': 'extension'},
             onload:res=>{
                 const d = safeJSON(res.responseText);
                 renderAnnouncement(d && d.announcement);
@@ -1299,6 +1299,7 @@ function GM_xmlhttpRequest(options) {
         // 关键：版本号必须与「是否实际带上了签名」一致 —— 能签名才宣告 4.0.14，
         // 否则回退旧版本号走服务端旧版路径（跳过签名校验），避免 403。
         headers['X-Music-Helper-Version'] = signHeaders['X-Signature'] ? SIGN_VERSION : LEGACY_VERSION;
+        headers['X-Client-Type'] = 'extension';
         Object.assign(headers, signHeaders);
         return new Promise(r => GM_xmlhttpRequest({
             method, url, headers,
@@ -1400,7 +1401,7 @@ function GM_xmlhttpRequest(options) {
         return new Promise(r => GM_xmlhttpRequest({
             method:'POST',
             url:`${API_BASE}/auth/claim`,
-            headers:{'Content-Type':'application/json','X-Music-Helper-Version': CURRENT_VERSION},
+            headers:{'Content-Type':'application/json','X-Music-Helper-Version': CURRENT_VERSION, 'X-Client-Type': 'extension'},
             data: JSON.stringify({ ticket }),
             onload: res => {
                 const d = safeJSON(res.responseText);
