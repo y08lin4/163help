@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         网易云音乐互助播放脚本
 // @namespace    http://tampermonkey.net/
-// @version      4.0.15
+// @version      4.0.16
 // @description  V4.0.6：播放进度心跳（反作弊数据收集）。
 // @author       y08lin4
 // @downloadURL  https://163music.linyu.qzz.io/music-help.user.js
@@ -20,7 +20,7 @@
     if (window.self !== window.top) return;
 
     const API_BASE = 'https://163music.linyu.qzz.io/api';
-    const SIGN_VERSION = '4.0.15'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
+    const SIGN_VERSION = '4.0.16'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
     const LEGACY_VERSION = '4.0.13';
     // HMAC 签名防重放（V4.0.14 引入）：只有能计算签名（crypto.subtle 可用）时才宣告
     // 新版本并携带 X-Timestamp/X-Nonce/X-Signature；不能算就保持旧版本号，服务端按
@@ -2143,6 +2143,58 @@
         url.searchParams.delete('music_helper_error');
         window.history.replaceState(null, '', url.pathname + (url.search ? url.search : '') + url.hash);
     }
+
+    /* —— 播放趋势自动上传（音乐人后台播放趋势 → 平台每日上报）——
+     * 趋势接口（纯 Cookie MUSIC_U 即可，无 csrf/风控）：
+     *   GET https://music.163.com/api/creator/musician/play/count/statistic/data/trend/get?startTime=YYYY-MM-DD&endTime=YYYY-MM-DD
+     * 返回 {code:200, data:[{dateTime:"YYYY-MM-DD", dataValue:"10"},...]}，dataValue 为字符串数字。
+     * 音乐人账号才有数据；普通账号 code!=200 或 data 为空 → 静默放弃（不提示、不重试风暴）。
+     * 注意：日期用浏览器本地时区；上报 date 透传网易云 dateTime，后端按服务器时区校验。
+     */
+    const AUTO_PLAY_SYNC_DATE_KEY = 'mh_auto_play_sync_date';
+    function localDateStr(d) {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        return y + '-' + m + '-' + day;
+    }
+    async function syncPlayTrendAuto() {
+        try {
+            // 未登录平台（无 Bearer token）→ 无法上报，静默返回。
+            if (!GM_getValue(TOKEN_KEY, '')) return;
+            const today = localDateStr(new Date());
+            // 同一天只跑一次；失败不写日期，下次页面加载重试。
+            if (GM_getValue(AUTO_PLAY_SYNC_DATE_KEY, '') === today) return;
+            const start = localDateStr(new Date(Date.now() - 29 * 24 * 60 * 60 * 1000));
+            const url = '/api/creator/musician/play/count/statistic/data/trend/get?startTime=' + start + '&endTime=' + today;
+            const res = await fetch(url, { credentials: 'include' });
+            if (!res.ok) return;
+            const payload = await res.json();
+            if (!payload || payload.code !== 200 || !Array.isArray(payload.data) || payload.data.length === 0) return;
+            let reported = 0;
+            for (let i = 0; i < payload.data.length; i++) {
+                const item = payload.data[i];
+                if (!item) continue;
+                const dateStr = item.dateTime ? String(item.dateTime).slice(0, 10) : '';
+                const rawVal = item.dataValue;
+                if (!dateStr || rawVal === null || rawVal === undefined || rawVal === '') continue;
+                const playCount = Number(rawVal);
+                if (!Number.isFinite(playCount) || playCount < 0) continue;
+                const r = await requestAPI('POST', '/play-report', { date: dateStr, playCount: playCount, note: '自动同步' });
+                if (r && r.status === 200) reported += 1;
+            }
+            // 至少成功上报一天才写日期，避免当天反复重试；全失败则不写（下次加载重试）。
+            if (reported > 0) {
+                GM_setValue(AUTO_PLAY_SYNC_DATE_KEY, today);
+            }
+            console.debug('[music-help] play trend auto sync: reported=' + reported + '/' + payload.data.length);
+        } catch (e) {
+            console.debug('[music-help] play trend auto sync skipped:', e && e.message);
+        }
+    }
+
+    // 页面加载后延迟 5 秒静默同步（避开心跳等首屏逻辑）。
+    setTimeout(syncPlayTrendAuto, 5000);
 
     setTimeout(async () => {
         initUI();
