@@ -97,6 +97,18 @@ function GM_xmlhttpRequest(options) {
     if (window.self !== window.top) return;
 
     const API_BASE = 'https://163music.linyu.qzz.io/api';
+    var vipTypeCache = null;
+    function ensureVipType() {
+      if (vipTypeCache !== null) return Promise.resolve(vipTypeCache);
+      return fetch('/api/nuser/account/get', { credentials: 'include' })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          var vt = d && d.account && typeof d.account.vipType === 'number' ? d.account.vipType : 0;
+          vipTypeCache = vt;
+          return vt;
+        })
+        .catch(function () { vipTypeCache = 0; return 0; });
+    }
     const SIGN_VERSION = '4.0.15'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
     const LEGACY_VERSION = '4.0.13';
     // HMAC 签名防重放（V4.0.14 引入）：只有能计算签名（crypto.subtle 可用）时才宣告
@@ -1168,10 +1180,11 @@ function GM_xmlhttpRequest(options) {
     }
 
     async function fetchConfig() {
+        var vt = await ensureVipType();
         return new Promise(r => GM_xmlhttpRequest({
             method:'GET',
             url:`${API_BASE}/auth-config`,
-            headers:{'X-Music-Helper-Version': CURRENT_VERSION, 'X-Client-Type': 'extension'},
+            headers:{'X-Music-Helper-Version': CURRENT_VERSION, 'X-Client-Type': 'extension', 'X-Vip-Type': String(vt)},
             onload:res=>{
                 const d = safeJSON(res.responseText);
                 renderAnnouncement(d && d.announcement);
@@ -1294,12 +1307,14 @@ function GM_xmlhttpRequest(options) {
     async function requestAPI(method, path, body = null, token = GM_getValue(TOKEN_KEY, '')) {
         const rawBody = body ? JSON.stringify(body) : '';
         const url = `${API_BASE}${path}`;
+        var vt = await ensureVipType();
         const headers = { 'Authorization':`Bearer ${token}`,'Content-Type':'application/json' };
         const signHeaders = await buildSignHeaders(method, url, rawBody, token);
         // 关键：版本号必须与「是否实际带上了签名」一致 —— 能签名才宣告 4.0.14，
         // 否则回退旧版本号走服务端旧版路径（跳过签名校验），避免 403。
         headers['X-Music-Helper-Version'] = signHeaders['X-Signature'] ? SIGN_VERSION : LEGACY_VERSION;
         headers['X-Client-Type'] = 'extension';
+        headers['X-Vip-Type'] = String(vt);
         Object.assign(headers, signHeaders);
         return new Promise(r => GM_xmlhttpRequest({
             method, url, headers,
@@ -1398,10 +1413,11 @@ function GM_xmlhttpRequest(options) {
     }
 
     async function claimTicket(ticket) {
+        var vt = await ensureVipType();
         return new Promise(r => GM_xmlhttpRequest({
             method:'POST',
             url:`${API_BASE}/auth/claim`,
-            headers:{'Content-Type':'application/json','X-Music-Helper-Version': CURRENT_VERSION, 'X-Client-Type': 'extension'},
+            headers:{'Content-Type':'application/json','X-Music-Helper-Version': CURRENT_VERSION, 'X-Client-Type': 'extension', 'X-Vip-Type': String(vt)},
             data: JSON.stringify({ ticket }),
             onload: res => {
                 const d = safeJSON(res.responseText);
