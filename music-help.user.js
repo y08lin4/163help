@@ -1166,6 +1166,60 @@
         return expiresAt > 0 && now >= expiresAt - TOKEN_REFRESH_SKEW_MS;
     }
 
+    /* —— 网易云账号登录态读取（大小号关联识别）——
+     * 读取链路（按可靠性降序，页面上下文可直接读 cookie/localStorage）：
+     *   1) 同源调网易云自身接口 /api/nuser/account/get（需登录态，credentials:'include'），
+     *      返回 { account:{id:数字, vipType}, profile:{nickname} } —— 最权威的 id + 昵称来源；
+     *   2) cookie MUSIC_U：URL 编码的数字串，decodeURIComponent 后即网易云数字用户 ID（兜底 id）；
+     *   3) localStorage 候选 key：netease_user_id / neteaseUserId / uid / MUSIC_U（兜底 id）。
+     *   昵称拿不到时允许留空（只收集 netease_id，netease_name 空串）。
+     */
+    let neteaseIdentityCache = null;
+    function readNeteaseIdFromCookieOrStorage() {
+        try {
+            const cookies = String(document.cookie || '').split(';');
+            for (let i = 0; i < cookies.length; i++) {
+                const parts = cookies[i].split('=');
+                if (parts.length < 2) continue;
+                const key = parts[0].trim();
+                if (key === 'MUSIC_U') {
+                    const raw = parts.slice(1).join('=').trim();
+                    if (raw) {
+                        const decoded = decodeURIComponent(raw);
+                        if (/^\d{1,32}$/.test(decoded)) return decoded;
+                    }
+                }
+            }
+        } catch (e) {}
+        try {
+            const candidates = ['netease_user_id', 'neteaseUserId', 'uid', 'MUSIC_U'];
+            for (let i = 0; i < candidates.length; i++) {
+                const v = localStorage.getItem(candidates[i]);
+                if (v && /^\d{1,32}$/.test(String(v).trim())) return String(v).trim();
+            }
+        } catch (e) {}
+        return '';
+    }
+    function getNeteaseIdentity() {
+        if (neteaseIdentityCache !== null) return Promise.resolve(neteaseIdentityCache);
+        return fetch('/api/nuser/account/get', { credentials: 'include' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                let id = '';
+                let name = '';
+                if (d && d.account && d.account.id != null) id = String(d.account.id);
+                if (!/^\d{1,32}$/.test(id)) id = '';
+                if (d && d.profile && typeof d.profile.nickname === 'string') name = d.profile.nickname;
+                if (!id) id = readNeteaseIdFromCookieOrStorage();
+                neteaseIdentityCache = { id: id || '', name: name || '' };
+                return neteaseIdentityCache;
+            })
+            .catch(function () {
+                neteaseIdentityCache = { id: readNeteaseIdFromCookieOrStorage(), name: '' };
+                return neteaseIdentityCache;
+            });
+    }
+
     /* —— HMAC 签名防重放（V4.0.14）——
      * 签名密钥 = 会话 access token（raw token，与 Authorization: Bearer 一致）；
      * 签名消息 = METHOD + "\n" + path(含 query) + "\n" + timestamp + "\n" + nonce + "\n" + body；
@@ -1928,7 +1982,9 @@
                 // 每 10 秒上报一次进度（反作弊数据收集，纯记录不校验）
                 if (now - lastHeartbeatAt >= 10000 && cur > 0) {
                     lastHeartbeatAt = now;
-                    requestAPI('POST', '/play/heartbeat', { jobId: jobId, positionMs: Math.floor(cur) });
+                    getNeteaseIdentity().then(function (ident) {
+                        requestAPI('POST', '/play/heartbeat', { jobId: jobId, positionMs: Math.floor(cur), neteaseId: ident.id, neteaseName: ident.name });
+                    });
                 }
                 // 播放中进度长时间不动（VIP 试听卡死等）：state='play' 但进度超过 PLAYBACK_STALL_MS 未前移，判定卡死主动放弃
                 if (state === 'play' && dur > 0) {
