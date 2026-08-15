@@ -989,6 +989,7 @@ function GM_xmlhttpRequest(options) {
                     <div style="display:flex; align-items:center; gap:8px;">
                         <a id="header-update-link" style="display:none; font-size:12px; color:var(--brand); cursor:pointer;">更新扩展</a>
                         <a id="portal-link" href="${getPortalUrl()}" target="_blank" rel="noopener noreferrer" style="font-size:12px; color:var(--link); text-decoration:underline;">个人中心</a>
+                        <a id="mute-toggle-link" title="切换网易云标签页静音（默认开）" style="font-size:12px; color:var(--link); cursor:pointer;">静音:开</a>
                         <a id="logout-link" style="font-size:12px; color:var(--text-muted); display:${token ? 'block' : 'none'}">退出</a>
                         <span id="min-btn" style="cursor:pointer; color:var(--text-muted);">—</span>
                     </div>
@@ -1111,6 +1112,20 @@ function GM_xmlhttpRequest(options) {
         };
         document.getElementById('update-script-btn').onclick = () => { window.location.href = getUpdateUrl(); };
         document.getElementById('header-update-link').onclick = () => { window.location.href = getUpdateUrl(); };
+        // —— 静音开关：经 bridge.js（ISOLATED world）转发给 background ——
+        const muteLink = document.getElementById('mute-toggle-link');
+        const renderMuteState = (enabled) => {
+            muteLink.textContent = enabled ? '静音:开' : '静音:关';
+            muteLink.style.color = enabled ? 'var(--link)' : '#e6a23c';
+        };
+        muteLink.onclick = () => {
+            window.postMessage({ __mhBridge: true, type: 'mh-toggle-mute' }, '*');
+        };
+        window.addEventListener('message', (ev) => {
+            if (!ev.data || ev.data.__mhBridge !== true || ev.data.type !== 'mh-mute-state') return;
+            renderMuteState(!!ev.data.enabled);
+        });
+        window.postMessage({ __mhBridge: true, type: 'mh-get-mute-state' }, '*');
         document.getElementById('logout-link').onclick = async () => {
             await requestAPI('POST', '/auth/logout');
             releaseTabLock();

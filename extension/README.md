@@ -2,7 +2,7 @@
 
 本扩展是 `music-help.user.js`（Tampermonkey 油猴脚本）的**独立移植版本**，不依赖 Tampermonkey，可作为普通 Chrome 扩展安装。你也可以继续使用油猴脚本，两者功能一致。
 
-- 版本：`4.0.14`
+- 版本：`4.0.15`
 - API 服务：`https://163music.linyu.qzz.io/api`
 
 ## 安装（加载已解压的扩展程序）

@@ -9,11 +9,16 @@
   "content_scripts": [
     {
       "matches": ["*://music.163.com/*"],
+      "js": ["bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["*://music.163.com/*"],
       "js": ["content.js"],
       "run_at": "document_idle",
       "world": "MAIN"
     }
   ],
-  "permissions": ["tabs"],
+  "permissions": ["tabs", "storage"],
   "host_permissions": ["https://163music.linyu.qzz.io/*"]
 }
