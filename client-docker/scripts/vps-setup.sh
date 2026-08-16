@@ -6,27 +6,27 @@
 #   1. 检测并安装 Docker Engine（curl -fsSL https://get.docker.com | sh）
 #   2. 创建数据目录（默认 /opt/163music-docker/data）
 #   3. 双通道获取镜像（自动选择，见下方「镜像来源」）
-#   4. 指导登录 GHCR（读 GHCR_PAT 环境变量或交互输入；仅 GHCR 通道需要）
+#   4. 登录 GHCR（可选：镜像已公开匿名可拉；设置了 GHCR_PAT 时才显式登录）
 #   5. docker run 运行容器（常驻、自启、内存限制 1g）
 #   6. 打印后续升级命令
 #
 # 镜像来源（IMAGE_SOURCE 环境变量控制，默认 auto）：
 #   通道 1 GitHub GHCR：
 #     docker pull ghcr.io/y08lin4/163music-help/docker-client:latest
-#     私有包需要 GHCR PAT（read:packages 权限），经 GHCR_PAT 传入或交互输入。
+#     镜像已公开，匿名即可拉取，无需 PAT（历史私有期凭据仍可通过 GHCR_PAT 传入）。
 #   通道 2 Cloudflare CDN（tar）：
 #     curl 下载 tar 包并 docker load，无需登录任何 registry。
 #   IMAGE_SOURCE=auto（默认）：先试 GHCR，失败自动切换 CDN；
 #   IMAGE_SOURCE=ghcr       ：强制 GHCR（失败即退出并提示 CDN 命令）；
-#   IMAGE_SOURCE=cdn        ：强制 CDN（跳过 GHCR 登录，无 PAT 时最省事）。
+#   IMAGE_SOURCE=cdn        ：强制 CDN（跳过 GHCR 登录，国内网络推荐）。
 #
 # 用法：
 #   chmod +x vps-setup.sh
-#   # 方式 A：通过环境变量提供 PAT（推荐，脚本可完全无交互运行）
-#   UI_PASSWORD='你的密码' GHCR_PAT='ghp_xxx' ./vps-setup.sh
+#   # 方式 A：只给 UI 密码（镜像公开，无需 PAT）
+#   UI_PASSWORD='你的密码' ./vps-setup.sh
 #   # 方式 B：不传环境变量，脚本会交互询问
 #   sudo ./vps-setup.sh
-#   # 强制走 CDN 通道（无需 PAT）：
+#   # 强制走 CDN 通道（国内网络推荐）：
 #   IMAGE_SOURCE=cdn UI_PASSWORD='你的密码' ./vps-setup.sh
 # =============================================================================
 
@@ -111,20 +111,17 @@ ensure_data_dir() {
 }
 
 # =============================================================================
-# 3) 登录 GHCR（私有镜像，拉取前必须认证）
+# 3) 登录 GHCR（可选；镜像已公开，匿名即可拉取）
 # -----------------------------------------------------------------------------
-# GHCR 的包默认是私有的，VPS 拉取需要 PAT（读包权限 read:packages）。
-# 仅 GHCR 通道需要：IMAGE_SOURCE=auto（尝试 GHCR 时）或 IMAGE_SOURCE=ghcr 会调用；
-# IMAGE_SOURCE=cdn 时跳过本函数。优先读环境变量 GHCR_PAT，否则交互输入（不回显）。
+# 镜像 ghcr.io/y08lin4/163music-help/docker-client 已公开，无需 PAT 即可 pull。
+# 本函数仅在设置了 GHCR_PAT 时做一次显式登录（兼容历史私有期凭据），
+# 未设置则直接跳过（匿名拉取）。IMAGE_SOURCE=cdn 时同样跳过。
 # =============================================================================
 login_ghcr() {
     local pat="${GHCR_PAT:-}"
     if [[ -z "${pat}" ]]; then
-        read -r -s -p "请输入 GHCR PAT（read:packages 权限，输入不回显）: " pat
-        echo
-    fi
-    if [[ -z "${pat}" ]]; then
-        die "未提供 GHCR PAT。请设置 GHCR_PAT 环境变量或交互输入后重试。"
+        log "镜像已公开，跳过 GHCR 登录（匿名拉取）"
+        return 0
     fi
 
     # 通过 stdin 传 PAT，避免明文出现在 ps 输出或命令行参数里

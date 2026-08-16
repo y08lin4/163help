@@ -141,7 +141,9 @@ class ApiClient {
     if (!this.isKeyMode() && this._tokenNeedsRefresh()) {
       const refreshed = await this.refreshAccessToken(true);
       if (!refreshed) {
-        this._alarm('会话已失效，请重新粘贴 ticket 或 client key');
+        // 续期失败：永久失效时 refreshAccessToken 内部已 clearCredential + alarm；
+        // 网络类临时失败则保留凭证，这里仅记录日志并跳过本次请求（与 401 重试路径告警行为一致）。
+        this._log('warn', `token 续期失败，跳过请求 ${method} ${path}`);
         return null;
       }
     }
@@ -203,16 +205,34 @@ class ApiClient {
     if (this._refreshPromise) return this._refreshPromise;
 
     this._refreshPromise = (async () => {
-      // refresh 请求体携带原 token（沿用脚本核心逻辑 /auth/refresh 的入参语义）
-      const result = await this._request('POST', '/auth/refresh', { token });
-      if (result.status === 200 && result.payload && result.payload.token) {
-        this.setCredential(result.payload.token);
-        this.setSessionExpiry(result.payload);
-        this._log('info', 'session token 已续期');
-        return true;
+      // refresh 请求体携带原 token（沿用脚本核心逻辑 /auth/refresh 的入参语义）。
+      // 网络类错误（status:0 / 5xx）做有限次指数退避重试且不清凭证；
+      // 仅明确 401（凭证永久失效）或 403（封禁）才清凭证并告警（提示重新登录）。
+      const maxAttempts = 3;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const result = await this._request('POST', '/auth/refresh', { token });
+        if (result.status === 200 && result.payload && result.payload.token) {
+          this.setCredential(result.payload.token);
+          this.setSessionExpiry(result.payload);
+          this._log('info', 'session token 已续期');
+          return true;
+        }
+        if (result.status === 401 || result.status === 403) {
+          const code = result.payload && result.payload.error
+            ? result.payload.error
+            : (result.status === 401 ? 'invalid_or_expired_token' : 'forbidden');
+          this._log('warn', `续期失败（${result.status} ${code}）：凭证已失效`);
+          this.clearCredential();
+          this._alarm(`登录态已失效（${code}），请重新粘贴 ticket 或 client key`);
+          return false;
+        }
+        // status:0（网络错误）/ 5xx（服务端临时故障）：保留旧凭证，退避后重试。
+        this._log('warn', `续期失败（${result.status}）：网络/服务端临时故障，保留凭证退避重试 ${attempt}/${maxAttempts}`);
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * Math.pow(2, attempt - 1)));
+        }
       }
-      this._log('warn', `续期失败：${result.status}`);
-      this.clearCredential();
+      // 连续网络/5xx 失败：不清凭证，交由下次调用重试。
       return false;
     })();
 

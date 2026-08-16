@@ -155,31 +155,32 @@ class Browser {
    *   GM_xmlhttpRequest（桥接 window.__bridge.request）、可选 window.__bridge.log/status。
    * __bridge 通过 exposeFunction 由 Node 侧暴露。
    */
-  _gmShimSource(snapshot) {
-    // 序列化快照安全注入（避免 </script> 破坏，helper-core 非 html 上下文，但仍做转义）。
-    const snapshotJson = JSON.stringify(snapshot || {}).replace(/</g, '\\u003c');
+  _gmShimSource() {
+    // 一次性注入（P24）：GM_* 一律读 live 全局 window.__gmStore，快照由 reload() 每次导航后
+    // 通过 page.evaluate 写回，不再把快照固化成 initScript —— 避免 addInitScript 无限累积。
     return `(function(){
   'use strict';
-  var __gmStore = window.__gmStore = ${snapshotJson};
+  window.__gmStore = window.__gmStore || {};
   var __bridge = (typeof window.__bridge === 'object' && window.__bridge) ? window.__bridge : null;
 
   function GM_getValue(key, def) {
     var k = String(key);
-    if (Object.prototype.hasOwnProperty.call(__gmStore, k) && __gmStore[k] !== undefined) {
-      return __gmStore[k];
+    var store = window.__gmStore || {};
+    if (Object.prototype.hasOwnProperty.call(store, k) && store[k] !== undefined) {
+      return store[k];
     }
     return (def === undefined ? undefined : def);
   }
   function GM_setValue(key, value) {
     var k = String(key);
-    __gmStore[k] = value;
+    window.__gmStore[k] = value;
     if (__bridge && typeof __bridge.set === 'function') {
       try { __bridge.set(k, value); } catch (e) {}
     }
   }
   function GM_deleteValue(key) {
     var k = String(key);
-    delete __gmStore[k];
+    delete window.__gmStore[k];
     if (__bridge && typeof __bridge.set === 'function') {
       try { __bridge.set(k, null); } catch (e) {}
     }
@@ -270,6 +271,7 @@ class Browser {
       this._log('error', '浏览器进程已断开（disconnected）');
       this.page = null;
       this.context = null;
+      this.browser = null; // P23：清掉死进程引用，orchestrator 可据此判定「未运行」并重建
       if (typeof this.onDisconnect === 'function') {
         try { this.onDisconnect(); } catch (e) { /* 忽略 */ }
       }
@@ -288,12 +290,11 @@ class Browser {
     // 不接听会阻塞页面——统一自动 dismiss，避免互助主循环卡死。
     this.page.on('dialog', (dialog) => { dialog.dismiss().catch(() => {}); });
 
-    // 1) 预注入 GM shim（每次 navigation 前都会注入，因 addInitScript 作用于此 context）
-    const snapshot = this._buildGmStore();
-    await this.context.addInitScript(this._gmShimSource(snapshot));
-
-    // 2) exposeFunction 暴露 __bridge（Node 侧函数 → 页内 window.__bridge.*）
+    // 1) exposeFunction 暴露 __bridge（Node 侧函数 → 页内 window.__bridge.*）。
     await this._exposeBridge();
+
+    // 2) 一次性注入 GM shim（读 live window.__gmStore；快照由 reload() 每次导航后写回，见 P24）。
+    await this.context.addInitScript(this._gmShimSource());
 
     // 3) 注入 Cookie 并 navigate
     await this.reload();
@@ -445,6 +446,9 @@ class Browser {
       // 首次：navigate 到首页
       await this.page.goto(this.config.musicHome, { waitUntil: 'domcontentloaded' });
     }
+    // P24：导航后、注入 helper-core 前，把最新 store 快照写回页内 window.__gmStore（shim 一次性注入，
+    // 不再 addInitScript 累积；运行期 token 刷新/凭证变化由此即时反映）。
+    await this.page.evaluate((snap) => { window.__gmStore = snap; }, this._buildGmStore());
     await this.injectHelperCore();
     this._lastReloadAt = Date.now();
   }

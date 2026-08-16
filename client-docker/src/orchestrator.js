@@ -55,6 +55,8 @@ class Orchestrator {
     });
     this._pollTimer = null;
     this._stopRequested = false;
+    this._reconnecting = false;     // 崩溃自动重连防抖标志（P23）
+    this._reconnectTimer = null;    // P23 自动重连定时器句柄（stop/关闭时可取消）
     this._lockChecked = false;      // 是否已完成首次 /api/me 账号锁定
     this._lastPrefSnapshot = null;
     this._lastCookieSnapshot = null;
@@ -134,7 +136,9 @@ class Orchestrator {
         });
         this.browser.onDisconnect = () => {
           this._log('error', '浏览器进程崩溃，标记浏览器未运行');
+          this.browser = null; // P23：清掉死实例引用，允许后续 _startBrowserWithRetry 重建
           this._setRunState({ browser: false }).catch(() => {});
+          this._scheduleReconnect();
         };
         await this.browser.launch();
         await this._setRunState({ browser: true });
@@ -149,6 +153,28 @@ class Orchestrator {
     }
     await this._setRunState({ browser: false });
     this._alarm('浏览器启动连续失败 ' + START_RETRY_MAX + ' 次，已放弃');
+  }
+
+  /** 浏览器崩溃后自动重连（P23）：延迟重试，受 stop 意图与并发保护。 */
+  _scheduleReconnect() {
+    if (this._stopRequested || this._reconnecting) return;
+    this._reconnecting = true;
+    this._log('info', '浏览器已崩溃，安排自动重连');
+    this._reconnectTimer = setTimeout(async () => {
+      this._reconnectTimer = null;
+      this._reconnecting = false;
+      if (this._stopRequested) return;
+      await this._startBrowserWithRetry();
+    }, START_RETRY_DELAY_MS);
+  }
+
+  /** 取消待执行的自动重连（stop/关闭时调用，避免 stop 后定时器抢跑复活浏览器）。 */
+  _cancelReconnect() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    this._reconnecting = false;
   }
 
   /**
@@ -183,6 +209,7 @@ class Orchestrator {
     if (intent === 'stop') {
       await this.store.delete(KEYS.control);
       this._stopRequested = true;
+      this._cancelReconnect();
       this._log('info', '收到 stop 意图：关闭浏览器并停止循环');
       await this._stopBrowser();
       await this._setRunState({ orchestrator: false, browser: false });
@@ -232,6 +259,7 @@ class Orchestrator {
       // 已锁定过但本次校验失败（user_id 变化被 api-client 判定为 false 已 alarm）
       this._log('error', '账号校验失败，停止循环');
       this._stopRequested = true;
+      this._cancelReconnect();
       await this._stopBrowser();
       await this._setRunState({ orchestrator: false, browser: false });
       return;
@@ -282,6 +310,7 @@ class Orchestrator {
   /** 停止编排（供外部/进程退出调用）。 */
   async stop() {
     this._stopRequested = true;
+    this._cancelReconnect();
     if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
     await this._stopBrowser();
     await this._setRunState({ orchestrator: false, browser: false });

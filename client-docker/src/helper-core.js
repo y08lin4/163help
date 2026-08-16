@@ -388,7 +388,15 @@
 
     async function prepareTargetPlayback(targetSongId) {
         if (!targetSongId) return 'load_failed';
-        if (!await isPlayableSong(targetSongId)) return 'song_unplayable';
+        // isPlayableSong 可能返回 'network_error'（网络失败，未写缓存）：退避重试，瞬时抖动不判不可播；
+        // 确实不可播（false）才返回 song_unplayable；仍网络失败则按 load_failed 处理（同样不写不可播缓存）。
+        let playable = await isPlayableSong(targetSongId);
+        for (let attempt = 0; playable === 'network_error' && attempt < 2; attempt += 1) {
+            await wait(1000 * (attempt + 1));
+            playable = await isPlayableSong(targetSongId);
+        }
+        if (playable === false) return 'song_unplayable';
+        if (playable === 'network_error') return 'load_failed';
         try { const p = getSafePlayer(); if(p && p.stop) p.stop(); } catch(e) {}
         ensureTargetSong(targetSongId);
         await wait(600);
@@ -603,12 +611,17 @@
         updateMinButtonState();
     }
 
+    // 网络失败哨兵：fetchJSON 在网络层错误（fetch reject / 断网 / 非 2xx）时返回该值，
+    // 区别于「请求成功但无数据（null）」，供上层区分「网络抖动（退避重试）」与「确实不可播」。
+    const NETWORK_ERROR = {};
+
     async function fetchJSON(path) {
         try {
             const res = await fetch(path, { credentials: 'include' });
+            if (!res.ok) return NETWORK_ERROR; // 非 2xx（含 5xx / 风控 429）视为网络类失败
             return safeJSON(await res.text());
         } catch (e) {
-            return null;
+            return NETWORK_ERROR;
         }
     }
 
@@ -663,6 +676,7 @@
         const normalizedSongId = String(songId || '').trim();
         if (!/^\d+$/.test(normalizedSongId)) return null;
         const data = await fetchJSON(`/api/song/detail/?ids=${encodeURIComponent(JSON.stringify([Number(normalizedSongId)]))}`);
+        if (data === NETWORK_ERROR) return NETWORK_ERROR;
         const songs = Array.isArray(data && data.songs) ? data.songs : [];
         return songs.find(item => String(item && item.id ? item.id : '') === normalizedSongId) || null;
     }
@@ -686,6 +700,7 @@
             const chunk = uncachedIds.slice(i, i + 80);
             const numericIds = chunk.map(id => Number(id));
             const data = await fetchJSON(`/api/song/enhance/player/url?ids=${encodeURIComponent(JSON.stringify(numericIds))}&br=128000`);
+            if (data === NETWORK_ERROR) return NETWORK_ERROR;
             const rows = Array.isArray(data && data.data) ? data.data : [];
             rows.forEach(item => {
                 const id = String(item && item.id ? item.id : '').trim();
@@ -703,6 +718,7 @@
         if (cached && typeof cached.playable === 'boolean') return cached.playable;
 
         const detail = await fetchSongDetail(songId);
+        if (detail === NETWORK_ERROR) return 'network_error'; // 网络失败：不写不可播缓存
         const durationMs = Number(detail && (detail.dt || detail.duration || 0));
         const songName = detail && detail.name ? String(detail.name) : '';
         if (!Number.isFinite(durationMs) || durationMs <= 0) {
@@ -710,6 +726,7 @@
             return false;
         }
         const playable = await fetchPlayableSongIds([songId]);
+        if (playable === NETWORK_ERROR) return 'network_error';
         const result = playable.has(String(songId));
         setCachedSongMeta(cacheKey, { durationMs: Math.floor(durationMs), playable: result, name: songName });
         return result;
@@ -728,13 +745,16 @@
         }
 
         const detail = await fetchSongDetail(songId);
+        if (detail === NETWORK_ERROR) return 0; // 网络失败：不写缓存，交给进度兜底
         const durationMs = Number(detail && (detail.dt || detail.duration || 0));
         const songName = detail && detail.name ? String(detail.name) : '';
         if (Number.isFinite(durationMs) && durationMs > 0) {
             const playable = await fetchPlayableSongIds([songId]);
-            const isPlayable = playable.has(String(songId));
-            setCachedSongMeta(cacheKey, { durationMs: Math.floor(durationMs), playable: isPlayable, name: songName });
-            if (isPlayable) return Math.floor(durationMs);
+            if (playable !== NETWORK_ERROR) {
+                const isPlayable = playable.has(String(songId));
+                setCachedSongMeta(cacheKey, { durationMs: Math.floor(durationMs), playable: isPlayable, name: songName });
+                if (isPlayable) return Math.floor(durationMs);
+            }
         }
 
         const currentSongId = extractSongId(window.location.hash);
@@ -1072,10 +1092,11 @@
     }
 
     async function fetchConfig() {
+        const vt = await ensureVipType();
         return new Promise(r => GM_xmlhttpRequest({
             method:'GET',
             url:`${API_BASE}/auth-config`,
-            headers:{'X-Music-Helper-Version': CURRENT_VERSION, 'X-Client-Type': 'docker'},
+            headers:{'X-Music-Helper-Version': CURRENT_VERSION, 'X-Client-Type': 'docker', 'X-Vip-Type': String(vt)},
             onload:res=>{
                 const d = safeJSON(res.responseText);
                 renderAnnouncement(d && d.announcement);
@@ -1150,6 +1171,74 @@
         return expiresAt > 0 && now >= expiresAt - TOKEN_REFRESH_SKEW_MS;
     }
 
+    /* —— 网易云账号登录态读取（大小号关联识别）——
+     * 读取链路（按可靠性降序，页面上下文可直接读 cookie/localStorage）：
+     *   1) 同源调网易云自身接口 /api/nuser/account/get（需登录态，credentials:'include'），
+     *      返回 { account:{id:数字, vipType}, profile:{nickname} } —— 最权威的 id + 昵称来源；
+     *   2) cookie MUSIC_U：URL 编码的数字串，decodeURIComponent 后即网易云数字用户 ID（兜底 id）；
+     *   3) localStorage 候选 key：netease_user_id / neteaseUserId / uid / MUSIC_U（兜底 id）。
+     *   昵称拿不到时允许留空（只收集 netease_id，netease_name 空串）。
+     */
+    let neteaseIdentityCache = null;
+    function readNeteaseIdFromCookieOrStorage() {
+        try {
+            const cookies = String(document.cookie || '').split(';');
+            for (let i = 0; i < cookies.length; i++) {
+                const parts = cookies[i].split('=');
+                if (parts.length < 2) continue;
+                const key = parts[0].trim();
+                if (key === 'MUSIC_U') {
+                    const raw = parts.slice(1).join('=').trim();
+                    if (raw) {
+                        const decoded = decodeURIComponent(raw);
+                        if (/^\d{1,32}$/.test(decoded)) return decoded;
+                    }
+                }
+            }
+        } catch (e) {}
+        try {
+            const candidates = ['netease_user_id', 'neteaseUserId', 'uid', 'MUSIC_U'];
+            for (let i = 0; i < candidates.length; i++) {
+                const v = localStorage.getItem(candidates[i]);
+                if (v && /^\d{1,32}$/.test(String(v).trim())) return String(v).trim();
+            }
+        } catch (e) {}
+        return '';
+    }
+    function getNeteaseIdentity() {
+        if (neteaseIdentityCache !== null) return Promise.resolve(neteaseIdentityCache);
+        return fetch('/api/nuser/account/get', { credentials: 'include' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                let id = '';
+                let name = '';
+                if (d && d.account && d.account.id != null) id = String(d.account.id);
+                if (!/^\d{1,32}$/.test(id)) id = '';
+                if (d && d.profile && typeof d.profile.nickname === 'string') name = d.profile.nickname;
+                if (!id) id = readNeteaseIdFromCookieOrStorage();
+                neteaseIdentityCache = { id: id || '', name: name || '' };
+                return neteaseIdentityCache;
+            })
+            .catch(function () {
+                neteaseIdentityCache = { id: readNeteaseIdFromCookieOrStorage(), name: '' };
+                return neteaseIdentityCache;
+            });
+    }
+
+    // 网易云会员等级（vipType）采集：补齐 docker 端 X-Vip-Type 上报（对齐扩展端，服务端 /api/me、/api/next 消费）。
+    let vipTypeCache = null;
+    function ensureVipType() {
+        if (vipTypeCache !== null) return Promise.resolve(vipTypeCache);
+        return fetch('/api/nuser/account/get', { credentials: 'include' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                const vt = d && d.account && typeof d.account.vipType === 'number' ? d.account.vipType : 0;
+                vipTypeCache = vt;
+                return vt;
+            })
+            .catch(function () { vipTypeCache = 0; return 0; });
+    }
+
     /* —— HMAC 签名防重放（V4.0.14）——
      * 签名密钥 = 会话 access token（raw token，与 Authorization: Bearer 一致）；
      * 签名消息 = METHOD + "\n" + path(含 query) + "\n" + timestamp + "\n" + nonce + "\n" + body；
@@ -1208,12 +1297,14 @@
     async function requestAPI(method, path, body = null, token = GM_getValue(TOKEN_KEY, '')) {
         const rawBody = body ? JSON.stringify(body) : '';
         const url = `${API_BASE}${path}`;
+        const vt = await ensureVipType();
         const headers = { 'Authorization':`Bearer ${token}`,'Content-Type':'application/json' };
         const signHeaders = await buildSignHeaders(method, url, rawBody, token);
         // 关键：版本号必须与「是否实际带上了签名」一致 —— 能签名才宣告 4.0.14，
         // 否则回退旧版本号走服务端旧版路径（跳过签名校验），避免 403。
         headers['X-Music-Helper-Version'] = signHeaders['X-Signature'] ? SIGN_VERSION : LEGACY_VERSION;
         headers['X-Client-Type'] = 'docker';
+        headers['X-Vip-Type'] = String(vt);
         Object.assign(headers, signHeaders);
         return new Promise(r => GM_xmlhttpRequest({
             method, url, headers,
@@ -1230,32 +1321,48 @@
         if (!token) return false;
         const refreshExpiresAt = parseStoredTime(REFRESH_EXPIRES_AT_KEY);
         if (refreshExpiresAt > 0 && Date.now() >= refreshExpiresAt - TOKEN_REFRESH_SKEW_MS) {
-            clearStoredToken('invalid_or_expired_token');
-            location.reload();
+            // 刷新凭证已过期（永久失效）：给用户可见提示（走 handleAccessError），不再裸 reload。
+            handleAccessError('invalid_or_expired_token');
             return false;
         }
         if (!force && !tokenNeedsRefresh()) return true;
         if (refreshPromise) return refreshPromise;
 
         refreshPromise = (async () => {
-            const result = await requestAPI('POST', '/auth/refresh', { token }, '');
-            if (result.status === 200 && result.payload && result.payload.token) {
-                storeSessionToken(result.payload);
-                return true;
+            // 网络类错误（status:0 / 5xx）做有限次指数退避重试且不清登录态；
+            // 仅明确 401（凭证永久失效）或 403（封禁/无权限）才走 handleAccessError 并清态。
+            const maxAttempts = 3;
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+                const result = await requestAPI('POST', '/auth/refresh', { token }, '');
+                if (result.status === 200 && result.payload && result.payload.token) {
+                    storeSessionToken(result.payload);
+                    return true;
+                }
+                if (result.status === 503 && result.payload && isServicePauseError(result.payload.error)) {
+                    handleServicePaused(result.payload);
+                    return false;
+                }
+                if (result.status === 403) {
+                    handleAccessError(
+                        result.payload && result.payload.error ? result.payload.error : 'forbidden',
+                        result.payload && result.payload.message ? result.payload.message : '',
+                    );
+                    return false;
+                }
+                if (result.status === 401) {
+                    // 刷新令牌已失效/被吊销：永久失效。
+                    handleAccessError(
+                        result.payload && result.payload.error ? result.payload.error : 'invalid_or_expired_token',
+                        result.payload && result.payload.message ? result.payload.message : '',
+                    );
+                    return false;
+                }
+                // status:0（网络错误）/ 5xx（服务端临时故障）：保留旧凭证，退避后重试。
+                if (attempt < maxAttempts) {
+                    await wait(1000 * Math.pow(2, attempt - 1)); // 1s, 2s
+                }
             }
-            if (result.status === 503 && result.payload && isServicePauseError(result.payload.error)) {
-                handleServicePaused(result.payload);
-                return false;
-            }
-            if (result.status === 403) {
-                handleAccessError(
-                    result.payload && result.payload.error ? result.payload.error : 'forbidden',
-                    result.payload && result.payload.message ? result.payload.message : '',
-                );
-                return false;
-            }
-            clearStoredToken(result.payload && result.payload.error ? result.payload.error : 'invalid_or_expired_token');
-            location.reload();
+            // 连续网络/5xx 失败：不清登录态，保留旧凭证，交由下次调用重试。
             return false;
         })();
 
@@ -1312,10 +1419,11 @@
     }
 
     async function claimTicket(ticket) {
+        const vt = await ensureVipType();
         return new Promise(r => GM_xmlhttpRequest({
             method:'POST',
             url:`${API_BASE}/auth/claim`,
-            headers:{'Content-Type':'application/json','X-Music-Helper-Version': CURRENT_VERSION, 'X-Client-Type': 'docker'},
+            headers:{'Content-Type':'application/json','X-Music-Helper-Version': CURRENT_VERSION, 'X-Client-Type': 'docker', 'X-Vip-Type': String(vt)},
             data: JSON.stringify({ ticket }),
             onload: res => {
                 const d = safeJSON(res.responseText);
@@ -1671,7 +1779,9 @@
         isHelperRunning = false;
         activeJoinState = null;
         clearInterval(monitorTimer);
+        monitorTimer = null;
         clearInterval(joinTimer);
+        joinTimer = null;
         idleCleanupPlaybackBestEffort().catch(() => {});
         const toggleButton = document.getElementById('toggle-helper');
         const helperInfo = document.getElementById('helper-info');
@@ -1788,6 +1898,7 @@
             let mismatchTicks = 0, lastRetargetAt = 0, retargeting = false, recoveryAttempts = 0;
             let lastHeartbeatAt = 0;
             let lastCurMoveAt = 0, lastStallCur = 0;
+            let ticking = false; // monitorTick 重入保护：上一 tick 仍在 await（complete/recover/abandon）时跳过
             // 反作弊证据（finish 时随 /play/finish 上报服务端，字段名见 finishCurrentJob）：
             // 回退次数、观察到的最大倍速、是否判定卡死过、最后一次进度与有效播放漂移。
             let backwardJumps = 0, maxPlaybackRate = 0, stallDetected = false, lastDriftMs = 0;
@@ -1859,7 +1970,7 @@
                     await abandonCurrentJob(playbackError, 3000);
                     return false;
                 }
-                monitorTimer = setInterval(monitorTick, 1000);
+                if (isHelperRunning) monitorTimer = setInterval(monitorTick, 1000);
                 return true;
             };
             const completeCurrentJob = async (playedMs, positionMs, durationMs, requiredListenMs) => {
@@ -1907,7 +2018,10 @@
             };
             const monitorTick = async () => {
                 if (!isHelperRunning || finished) return;
-                const { cur, dur, state } = getProgress();
+                if (ticking) return; // 重入保护：上一 tick 仍在 await 中（complete/recover/abandon 最长 ~15s）
+                ticking = true;
+                try {
+                    const { cur, dur, state } = getProgress();
                 const now = Date.now();
                 const elapsed = now - startTime;
                 // 任务超时保护：超过 15 分钟（与服务端 JobActiveSeconds 一致）仍未完成则放弃，避免无限上报心跳
@@ -1922,7 +2036,9 @@
                 // 每 10 秒上报一次进度（反作弊数据收集，纯记录不校验）
                 if (now - lastHeartbeatAt >= 10000 && cur > 0) {
                     lastHeartbeatAt = now;
-                    requestAPI('POST', '/play/heartbeat', { jobId: jobId, positionMs: Math.floor(cur) });
+                    getNeteaseIdentity().then(function (ident) {
+                        requestAPI('POST', '/play/heartbeat', { jobId: jobId, positionMs: Math.floor(cur), neteaseId: ident.id, neteaseName: ident.name });
+                    });
                 }
                 // 播放中进度长时间不动（VIP 试听卡死等）：state='play' 但进度超过 PLAYBACK_STALL_MS 未前移，判定卡死主动放弃
                 if (state === 'play' && dur > 0) {
@@ -2063,9 +2179,12 @@
                     infoEl.innerText = `正在努力加载...`;
                     if (elapsed > 20000) document.getElementById('manual-btn').style.display = 'block';
                 }
-                prevCur = cur;
-                prevDur = dur;
-                prevTickAt = now;
+                    prevCur = cur;
+                    prevDur = dur;
+                    prevTickAt = now;
+                } finally {
+                    ticking = false;
+                }
             };
             monitorTimer = setInterval(monitorTick, 1000);
         } else {
