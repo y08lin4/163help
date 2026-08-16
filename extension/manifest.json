@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "网易云音乐互助播放脚本",
-  "version": "4.0.17",
+  "version": "4.0.18",
   "description": "网易云音乐互助播放脚本（Chrome MV3 扩展版）：登录、互助调度、自动播放与播放进度心跳。由 Tampermonkey 油猴脚本 music-help.user.js 独立移植，不依赖 Tampermonkey。",
   "background": {
     "service_worker": "background.js"
