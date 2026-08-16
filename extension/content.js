@@ -109,7 +109,7 @@ function GM_xmlhttpRequest(options) {
         })
         .catch(function () { vipTypeCache = 0; return 0; });
     }
-    const SIGN_VERSION = '4.0.16'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
+    const SIGN_VERSION = '4.0.17'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
     const LEGACY_VERSION = '4.0.13';
     // HMAC 签名防重放（V4.0.14 引入）：只有能计算签名（crypto.subtle 可用）时才宣告
     // 新版本并携带 X-Timestamp/X-Nonce/X-Signature；不能算就保持旧版本号，服务端按
