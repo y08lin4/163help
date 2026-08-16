@@ -2,7 +2,7 @@
 
 > 当前版本：**v4.0.17**
 
-网易云音乐互助播放的**客户端**仓库，提供两种独立安装方式：**油猴脚本** / **Chrome 浏览器扩展**（二选一即可）。
+网易云音乐互助播放的**客户端**仓库，提供三种独立客户端形态：**油猴脚本** / **Chrome 浏览器扩展** / **Docker 常驻客户端**（按需选择）。
 
 ## 这是什么
 
@@ -10,7 +10,7 @@
 
 **不卖播放量、不收费、不搞会员，纯社区互助。**
 
-## 安装方式（二选一）
+## 安装方式（三选一）
 
 ### 方式 A：油猴脚本
 
@@ -35,6 +35,22 @@
 
 > 扩展版只静音网易云标签，其它标签不受影响。
 
+
+### 方式 C：Docker 常驻客户端（VPS 24 小时在线）
+
+无需打开浏览器挂机，无头浏览器真实播放：
+
+```bash
+docker run -d --name 163music-docker-client --restart unless-stopped --memory 1g \
+  -e UI_PASSWORD='你的强密码' -e TZ=Asia/Shanghai \
+  -p 3000:3000 -v ./data:/data \
+  ghcr.io/y08lin4/163music-help/docker-client:latest
+```
+
+- 镜像：`ghcr.io/y08lin4/163music-help/docker-client`（`latest` / `docker-v4.0.17`）
+- 管理界面 `http://IP:3000`：粘贴网易云 Cookie + portal 客户端密钥（`mh_ck_` 开头）即可长期运行
+- 支持每日活跃时间窗口、Docker Compose、VPS 一键脚本
+- 源码与完整说明：本仓库的 `client-docker/` 目录
 ## 仓库结构
 
 ```
