@@ -1,0 +1,18 @@
+{
+  "name": "music-help-docker-client",
+  "version": "4.0.17",
+  "private": true,
+  "description": "网易云音乐互助播放 Docker 常驻客户端（第三种客户端形态）—— Playwright Chromium + 油猴核心逻辑注入",
+  "type": "commonjs",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/main.js",
+    "check": "node --check src/main.js && node --check src/config.js && node --check src/store.js && node --check src/signing.js && node --check src/api-client.js && node --check src/helper-core.js && node --check src/browser.js && node --check src/active-window.js && node --check src/server.js && node --check src/orchestrator.js && node --check src/public/app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "^1.45.0"
+  }
+}
