@@ -29,6 +29,7 @@ COPY client-docker/package.json ./
 #    注意：不要在下方 && 链内写行内 # 注释，会被 shell 连坐注释掉后续命令。
 RUN npm install --omit=dev \
     && npx playwright install --with-deps chromium \
+    && apt-get install -y --no-install-recommends fonts-noto-cjk \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/* /tmp/*
 

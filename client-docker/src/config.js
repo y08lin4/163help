@@ -9,8 +9,8 @@
 const path = require('path');
 
 // —— 客户端协议常量 ——
-// 版本头统一报 4.0.17（>= 4.0.14 的服务端会强制校验 HMAC 签名三件套）。
-const CLIENT_VERSION = '4.0.17';
+// 版本头统一报 4.0.18（>= 4.0.14 的服务端会强制校验 HMAC 签名三件套）。
+const CLIENT_VERSION = '4.0.18';
 // 活跃时间窗口最大跨度（小时），UI 与配置加载时双重校验。
 const MAX_ACTIVE_SPAN_HOURS = 16;
 // 客户端 key 前缀：以 mh_ck_ 开头视为 portal 粘贴的 client key（不换 token）。

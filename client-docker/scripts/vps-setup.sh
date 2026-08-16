@@ -5,9 +5,20 @@
 # 功能：
 #   1. 检测并安装 Docker Engine（curl -fsSL https://get.docker.com | sh）
 #   2. 创建数据目录（默认 /opt/163music-docker/data）
-#   3. 指导登录 GHCR（读 GHCR_PAT 环境变量或交互输入）
-#   4. docker run 运行容器（常驻、自启、内存限制 1g）
-#   5. 打印后续升级命令
+#   3. 双通道获取镜像（自动选择，见下方「镜像来源」）
+#   4. 指导登录 GHCR（读 GHCR_PAT 环境变量或交互输入；仅 GHCR 通道需要）
+#   5. docker run 运行容器（常驻、自启、内存限制 1g）
+#   6. 打印后续升级命令
+#
+# 镜像来源（IMAGE_SOURCE 环境变量控制，默认 auto）：
+#   通道 1 GitHub GHCR：
+#     docker pull ghcr.io/y08lin4/163music-help/docker-client:latest
+#     私有包需要 GHCR PAT（read:packages 权限），经 GHCR_PAT 传入或交互输入。
+#   通道 2 Cloudflare CDN（tar）：
+#     curl 下载 tar 包并 docker load，无需登录任何 registry。
+#   IMAGE_SOURCE=auto（默认）：先试 GHCR，失败自动切换 CDN；
+#   IMAGE_SOURCE=ghcr       ：强制 GHCR（失败即退出并提示 CDN 命令）；
+#   IMAGE_SOURCE=cdn        ：强制 CDN（跳过 GHCR 登录，无 PAT 时最省事）。
 #
 # 用法：
 #   chmod +x vps-setup.sh
@@ -15,6 +26,8 @@
 #   UI_PASSWORD='你的密码' GHCR_PAT='ghp_xxx' ./vps-setup.sh
 #   # 方式 B：不传环境变量，脚本会交互询问
 #   sudo ./vps-setup.sh
+#   # 强制走 CDN 通道（无需 PAT）：
+#   IMAGE_SOURCE=cdn UI_PASSWORD='你的密码' ./vps-setup.sh
 # =============================================================================
 
 set -euo pipefail
@@ -22,7 +35,11 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 # 可调参数（按需覆盖，例如：DATA_DIR=/srv/163music ./vps-setup.sh）
 # -----------------------------------------------------------------------------
+# 镜像获取通道：auto（默认，先 GHCR 后 CDN）| ghcr | cdn
+IMAGE_SOURCE="${IMAGE_SOURCE:-auto}"
 IMAGE="ghcr.io/y08lin4/163music-help/docker-client:latest"
+CDN_TAR_URL="https://163music.linyu.qzz.io/docker/163music-docker-client-latest.tar.gz"
+CDN_SHA_URL="${CDN_TAR_URL}.sha256"
 DATA_DIR="${DATA_DIR:-/opt/163music-docker/data}"
 CONTAINER_NAME="163music-docker-client"
 GHCR_NAMESPACE="ghcr.io/y08lin4"
@@ -97,7 +114,8 @@ ensure_data_dir() {
 # 3) 登录 GHCR（私有镜像，拉取前必须认证）
 # -----------------------------------------------------------------------------
 # GHCR 的包默认是私有的，VPS 拉取需要 PAT（读包权限 read:packages）。
-# 优先读环境变量 GHCR_PAT，否则交互输入（不回显）。
+# 仅 GHCR 通道需要：IMAGE_SOURCE=auto（尝试 GHCR 时）或 IMAGE_SOURCE=ghcr 会调用；
+# IMAGE_SOURCE=cdn 时跳过本函数。优先读环境变量 GHCR_PAT，否则交互输入（不回显）。
 # =============================================================================
 login_ghcr() {
     local pat="${GHCR_PAT:-}"
@@ -131,25 +149,104 @@ require_ui_password() {
 }
 
 # =============================================================================
-# 5) 拉取并运行容器
+# 5) 获取镜像（双通道）+ 运行容器
 # -----------------------------------------------------------------------------
 # 运行参数与客户端组件约定对齐：
-#   - 镜像    ghcr.io/y08lin4/163music-help/docker-client:latest
+#   - 镜像    ghcr.io/y08lin4/163music-help/docker-client:latest（两通道产物同名）
 #   - 环境    -e UI_PASSWORD（必填）、-e TZ=Asia/Shanghai
 #   - 端口    -p 3000:3000
 #   - 数据卷  -v /opt/163music-docker/data:/data
 #   - 自启    --restart unless-stopped
 #   - 内存    --memory 1g
+# 镜像获取策略（IMAGE_SOURCE）：
+#   auto（默认）先试 GHCR（需已登录），失败自动切换 Cloudflare CDN（tar，免登录）；
+#   ghcr 强制 GHCR；cdn 强制 CDN。成功时打印实际使用的通道。
 # =============================================================================
-run_container() {
-    # 先停掉已存在的同名容器，保证幂等（重复执行不会冲突）
-    if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
-        warn "检测到已存在的容器 ${CONTAINER_NAME}，停止并移除……"
-        docker rm -f "${CONTAINER_NAME}" >/dev/null
+pull_image_ghcr() {
+    log "镜像来源：GitHub GHCR"
+    if docker pull "${IMAGE}"; then
+        return 0
+    fi
+    warn "GHCR 拉取失败：${IMAGE}"
+    return 1
+}
+
+verify_tar_checksum() {
+    # 若 CDN 同目录存在 .sha256 校验文件则用 sha256sum -c 校验；
+    # 文件 404 时跳过校验（可选校验，容忍失败）。
+    if ! curl -fsSL -o /tmp/163music-docker-client.tar.gz.sha256 "${CDN_SHA_URL}"; then
+        warn "未获取到 .sha256 校验文件（${CDN_SHA_URL}），跳过校验。"
+        return 0
     fi
 
-    log "拉取镜像：${IMAGE}"
-    docker pull "${IMAGE}"
+    log "校验镜像校验和（sha256sum -c）……"
+    if (cd /tmp && sha256sum -c 163music-docker-client.tar.gz.sha256) >/dev/null 2>&1; then
+        log "校验通过"
+    else
+        # .sha256 内引用的文件名可能与本地文件名不一致，退化为按哈希内容比对
+        local expected actual
+        expected="$(awk '{gsub(/\r/,""); print $1}' /tmp/163music-docker-client.tar.gz.sha256 | head -n1)"
+        actual="$(sha256sum /tmp/163music-docker-client.tar.gz | awk '{print $1}')"
+        if [[ -z "${expected}" || "${expected}" != "${actual}" ]]; then
+            rm -f /tmp/163music-docker-client.tar.gz /tmp/163music-docker-client.tar.gz.sha256
+            die "镜像校验失败（${CDN_SHA_URL}）。请重新运行本脚本重试；若仍失败，可改用 IMAGE_SOURCE=ghcr 走 GHCR 通道。"
+        fi
+        log "校验通过（哈希比对）"
+    fi
+    rm -f /tmp/163music-docker-client.tar.gz.sha256
+}
+
+load_image_from_cdn() {
+    log "镜像来源：Cloudflare CDN（tar）"
+    if ! curl -fSL -o /tmp/163music-docker-client.tar.gz "${CDN_TAR_URL}"; then
+        rm -f /tmp/163music-docker-client.tar.gz
+        die "CDN 下载失败：${CDN_TAR_URL}。请重新运行本脚本重试；若仍失败，可改用 IMAGE_SOURCE=ghcr 走 GHCR 通道。"
+    fi
+    verify_tar_checksum
+    if ! docker load -i /tmp/163music-docker-client.tar.gz; then
+        rm -f /tmp/163music-docker-client.tar.gz
+        die "docker load 失败。请重新运行本脚本重试；若仍失败，可改用 IMAGE_SOURCE=ghcr 走 GHCR 通道。"
+    fi
+    rm -f /tmp/163music-docker-client.tar.gz
+}
+
+# 按 IMAGE_SOURCE 选择通道；GHCR 登录仅在需要走 GHCR 通道时执行。
+acquire_image() {
+    case "${IMAGE_SOURCE}" in
+        auto)
+            login_ghcr
+            if pull_image_ghcr; then
+                return 0
+            fi
+            warn "GHCR 拉取失败，自动切换到 Cloudflare CDN（tar）通道……"
+            load_image_from_cdn
+            ;;
+        ghcr)
+            login_ghcr
+            if ! pull_image_ghcr; then
+                local hint
+                hint="GHCR 拉取失败。可手动改用 CDN 通道重试：
+  IMAGE_SOURCE=cdn ./vps-setup.sh
+  或直接执行：
+  curl -fSL -o /tmp/163music-docker-client.tar.gz ${CDN_TAR_URL} && docker load -i /tmp/163music-docker-client.tar.gz"
+                die "${hint}"
+            fi
+            ;;
+        cdn)
+            load_image_from_cdn
+            ;;
+        *)
+            die "IMAGE_SOURCE 取值非法：${IMAGE_SOURCE}（允许：ghcr | cdn | auto）"
+            ;;
+    esac
+}
+
+run_container() {
+    # 已存在同名容器时提示并重建，保证幂等（重复执行不会冲突）
+    if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
+        warn "检测到已存在的容器 ${CONTAINER_NAME}，停止并移除后重建……"
+        docker rm -f "${CONTAINER_NAME}" >/dev/null
+    fi
 
     log "启动容器：${CONTAINER_NAME}"
     docker run -d \
@@ -187,6 +284,9 @@ print_upgrade_hints() {
       -v /opt/163music-docker/data:/data \
       ghcr.io/y08lin4/163music-help/docker-client:latest
 
+  # 也可以用 CDN 通道一键升级（免 PAT，脚本会自动重建容器）：
+  #   IMAGE_SOURCE=cdn ./vps-setup.sh
+
 ============================================
  常用运维命令
 ============================================
@@ -205,7 +305,7 @@ main() {
     install_docker
     ensure_data_dir
     require_ui_password
-    login_ghcr
+    acquire_image
     run_container
     print_upgrade_hints
     log "=== 部署完成 ==="

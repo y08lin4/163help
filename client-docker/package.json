@@ -1,6 +1,6 @@
 {
   "name": "music-help-docker-client",
-  "version": "4.0.17",
+  "version": "4.0.18",
   "private": true,
   "description": "网易云音乐互助播放 Docker 常驻客户端（第三种客户端形态）—— Playwright Chromium + 油猴核心逻辑注入",
   "type": "commonjs",

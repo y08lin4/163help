@@ -375,18 +375,24 @@ const MIME = {
 };
 
 function serveStatic(res, pathname) {
-  const rel = STATIC_FILES[pathname];
+  let rel = STATIC_FILES[pathname];
   if (!rel) {
+    // 允许引用 public 目录下其它静态资源（vue.global.js / styles.css 等）。
+    // 严格限制在 PUBLIC_DIR 内，杜绝路径穿越。
+    rel = pathname.replace(/^\/+/, '');
+  }
+  const full = path.join(PUBLIC_DIR, rel);
+  const insidePublic = full === PUBLIC_DIR || full.indexOf(PUBLIC_DIR + path.sep) === 0;
+  if (!insidePublic) {
     sendError(res, 404, 'not_found');
     return;
   }
-  const full = path.join(PUBLIC_DIR, rel);
   fs.readFile(full, (err, buf) => {
     if (err) {
       sendError(res, 404, 'not_found');
       return;
     }
-    const ext = path.extname(rel).toLowerCase();
+    const ext = path.extname(full).toLowerCase();
     res.writeHead(200, {
       'Content-Type': MIME[ext] || 'application/octet-stream',
       'Content-Length': buf.length,

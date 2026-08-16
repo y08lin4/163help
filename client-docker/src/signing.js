@@ -11,7 +11,7 @@
  *   - 凭证以 mh_ck_ 开头（portal 粘贴的 client key）时，HMAC 密钥 = sha256(凭证) 的小写 hex；
  *     服务端只存 key 的哈希，用哈希当验签密钥。
  *   - 否则（session token 模式）HMAC 密钥 = 凭证原文。
- *   - 版本头恒报 CLIENT_VERSION（4.0.17）。
+ *   - 版本头恒报 CLIENT_VERSION（4.0.18）。
  */
 
 const crypto = require('crypto');
