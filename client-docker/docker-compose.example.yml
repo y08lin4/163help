@@ -1,0 +1,26 @@
+# =============================================================================
+# 163music docker-client —— Docker Compose 部署示例
+# -----------------------------------------------------------------------------
+# 用法：先把本文件复制成 docker-compose.yml，改好 UI_PASSWORD 后执行：
+#   docker compose up -d
+#
+# 约定（与 scripts/vps-setup.sh / Dockerfile 对齐）：
+#   镜像 ghcr.io/y08lin4/163music-help/docker-client:latest
+#   端口 3000、数据卷 ./data:/data、--memory 1g、--restart unless-stopped
+# 注意：一个容器 = 一个网易云账号，多账号请复制多份 service 并改端口/数据卷。
+# =============================================================================
+
+services:
+  # 一个容器跑一个网易云账号；多账号就再复制一段，改容器名、宿主机端口与数据卷。
+  music-help-docker:
+    image: ghcr.io/y08lin4/163music-help/docker-client:latest
+    container_name: 163music-docker-client
+    restart: unless-stopped      # 崩溃/重启后自动拉起
+    mem_limit: 1g                # 内存上限 1G，防止无头浏览器吃爆内存
+    environment:
+      UI_PASSWORD: 请修改成你的强密码   # 必填，Web 管理界面登录密码；不设将拒绝启动
+      TZ: Asia/Shanghai
+    ports:
+      - "3000:3000"              # 宿主机:容器；宿主机端口冲突时改成 3001:3000 等
+    volumes:
+      - ./data:/data             # cookie/store/会话持久化，升级不丢数据
