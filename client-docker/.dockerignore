@@ -1,0 +1,8 @@
+node_modules
+data
+*.log
+.git
+.gitignore
+Dockerfile
+docker-compose.example.yml
+README.md
