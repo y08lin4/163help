@@ -1,0 +1,3 @@
+# data volume (cookies / store / sessions)
+data/
+*.log
