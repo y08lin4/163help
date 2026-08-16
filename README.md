@@ -36,21 +36,57 @@
 > 扩展版只静音网易云标签，其它标签不受影响。
 
 
-### 方式 C：Docker 常驻客户端（VPS 24 小时在线）
+### 方式 C：Docker 常驻客户端（VPS 24 小时在线互助）
 
-无需打开浏览器挂机，无头浏览器真实播放：
+不需要打开浏览器，把客户端放进 Docker 容器，在 VPS 上 **24 小时常驻互助**：无头浏览器（Playwright Chromium）真实播放，一个容器 = 一个网易云账号。当前版本 **v4.0.18**，镜像已公开、匿名可拉取。
+
+**一键脚本（自动选择镜像通道）**：脚本默认先试 GitHub GHCR、失败自动切换 Cloudflare CDN；国内 VPS 可 `IMAGE_SOURCE=cdn` 强制走 CDN（免登录、更稳）：
 
 ```bash
-docker run -d --name 163music-docker-client --restart unless-stopped --memory 1g \
-  -e UI_PASSWORD='你的强密码' -e TZ=Asia/Shanghai \
-  -p 3000:3000 -v ./data:/data \
+curl -fsSL https://raw.githubusercontent.com/y08lin4/163help/main/client-docker/scripts/vps-setup.sh -o vps-setup.sh
+chmod +x vps-setup.sh
+UI_PASSWORD='你的强密码' ./vps-setup.sh
+```
+
+**双通道手动安装（任选其一）**
+
+通道 A：GitHub GHCR（海外推荐）——镜像已公开、匿名可拉取，无需 `docker login`：
+
+```bash
+docker run -d \
+  --name 163music-docker-client \
+  --restart unless-stopped \
+  --memory 1g \
+  -e UI_PASSWORD='你的强密码' \
+  -e TZ=Asia/Shanghai \
+  -p 3000:3000 \
+  -v ./data:/data \
   ghcr.io/y08lin4/163music-help/docker-client:latest
 ```
 
-- 镜像：`ghcr.io/y08lin4/163music-help/docker-client`（`latest` / `docker-v4.0.17`）
-- 管理界面 `http://IP:3000`：粘贴网易云 Cookie + portal 客户端密钥（`mh_ck_` 开头）即可长期运行
-- 支持每日活跃时间窗口、Docker Compose、VPS 一键脚本
-- 源码与完整说明：本仓库的 `client-docker/` 目录
+通道 B：Cloudflare CDN tar（国内推荐）——无需登录任何 registry，国内拉取更稳：
+
+```bash
+# 1. 下载 tar 包（附 .sha256 校验文件，可选校验）
+curl -fSL -o /tmp/163music-docker-client.tar.gz \
+  https://163music.linyu.qzz.io/docker/163music-docker-client-latest.tar.gz
+curl -fSL -o /tmp/163music-docker-client.tar.gz.sha256 \
+  https://163music.linyu.qzz.io/docker/163music-docker-client-latest.tar.gz.sha256
+(cd /tmp && sha256sum -c 163music-docker-client.tar.gz.sha256)
+
+# 2. 导入镜像（镜像名与通道 A 相同，随后执行通道 A 的 docker run 命令即可）
+docker load -i /tmp/163music-docker-client.tar.gz
+```
+
+**要点**
+
+- **`UI_PASSWORD` 必设强密码**：Web 管理界面登录用，未设置容器会拒绝启动。
+- **管理界面**：`http://IP:3000`，粘贴网易云 Cookie + portal 客户端密钥（`mh_ck_` 开头）即可长期运行；宿主机端口冲突时自行映射，如 `-p 13000:3000`。
+- **数据持久化**：`-v ./data:/data`（cookie / store / 会话），升级不丢数据。
+- **升级**：`docker pull ghcr.io/y08lin4/163music-help/docker-client:latest` → `docker rm -f 163music-docker-client` → 用**相同数据卷**重新 `docker run`；或直接重跑一键脚本（自动重建容器）。
+- **常驻参数**：`--restart unless-stopped`（崩溃自动拉起）+ `--memory 1g`（防无头浏览器吃爆内存）+ `-e TZ=Asia/Shanghai`。
+- **镜像**：`ghcr.io/y08lin4/163music-help/docker-client`（tag：`latest` / `docker-v4.0.18`）。
+- 支持每日活跃时间窗口（跨零点，上限 16 小时）、Docker Compose、VPS 一键脚本；完整说明见仓库 `client-docker/` 目录。
 ## 仓库结构
 
 ```
