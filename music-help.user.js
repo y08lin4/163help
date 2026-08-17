@@ -477,6 +477,7 @@
         if (code === 'client_upgrade_required') return '当前脚本版本过旧，请先更新到最新版本后再继续使用。';
         if (code === 'service_paused') return '服务已暂停，请稍后再试。';
         if (code === 'service_manual_blocked') return '服务已被管理员临时暂停，请稍后再试。';
+        if (code === 'service_d1_blocked') return '网络环境不稳定，暂停互助一个小时';
         if (code === 'service_window_closed') return '当前不在开放使用日期内，请在管理员设置的开放日期内使用。';
         return code ? `发生错误：${code}` : '';
     }
@@ -1536,13 +1537,13 @@
         const todayReceived = Number(participant.today_received_help_count || 0);
         const todayReceivedLimit = Number(participant.today_received_limit || 0);
         const todayHelped = Number(participant.today_helped_count || 0);
-        const todayHelpedLimit = Number(participant.today_helped_limit || 200);
+        const todayHelpedLimit = Number(participant.today_helped_limit ?? 200);
         const monthlyReceived = Number(participant.monthly_received_help_count || 0);
         const monthlyLimit = Number(participant.monthly_received_limit || 0);
         const lines = [];
-        if (todayReceivedLimit > 0) lines.push(`今日被助: ${todayReceived} / ${todayReceivedLimit}`);
-        lines.push(`今日助力: ${todayHelped} / ${todayHelpedLimit}`);
-        if (monthlyLimit > 0) lines.push(`本月被助: ${monthlyReceived} / ${monthlyLimit}`);
+        if (todayReceivedLimit > 0) lines.push(`24 小时内被助: ${todayReceived} / ${todayReceivedLimit}`);
+        lines.push(`24 小时内帮听: ${todayHelped} / ${todayHelpedLimit > 0 ? todayHelpedLimit : '不限'}`);
+        if (monthlyLimit > 0) lines.push(`近 30 天被助: ${monthlyReceived} / ${monthlyLimit}`);
         lines.push(`可用额度: ${credits}`);
         // 数据区常驻可见，运行时也不被「正在互助」文本覆盖
         if (statsEl) {
@@ -1593,7 +1594,7 @@
         if (!summary || typeof summary !== 'object') return '暂无可互助目标，30s 后重试';
         const reason = String(summary.reason || '');
         if (reason === 'resting') return '已连续播放较久，正在随机休息，稍后自动恢复...';
-        if (reason === 'daily_limit') return '今日帮助次数已达上限，明天再来吧。';
+        if (reason === 'daily_limit') return '24 小时内帮助次数已达上限，24 小时滚动窗口结束后再来吧。';
         const participants = Number(summary.participants || 0);
         const notSelf = Number(summary.notSelf || 0);
         const active = Number(summary.active || 0);
@@ -1611,6 +1612,7 @@
             all_active_job_limited: '其他入队用户当前派发任务数已满',
             all_in_cooldown: '其他候选都处于同账号冷却期',
             no_eligible_participant: '当前没有满足条件的互助目标',
+            helper_banned: '网络环境不稳定，暂停互助一个小时',
         };
         return `${reasonMap[reason] || '暂无可互助目标'}，30s 后重试\n${detail}`;
     }
