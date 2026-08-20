@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         网易云音乐互助播放脚本
 // @namespace    http://tampermonkey.net/
-// @version      4.0.18
+// @version      4.0.19
 // @description  V4.0.6：播放进度心跳（反作弊数据收集）。
 // @author       y08lin4
 // @downloadURL  https://163music.linyu.qzz.io/music-help.user.js
@@ -20,7 +20,7 @@
     if (window.self !== window.top) return;
 
     const API_BASE = 'https://163music.linyu.qzz.io/api';
-    const SIGN_VERSION = '4.0.18'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
+    const SIGN_VERSION = '4.0.19'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
     const LEGACY_VERSION = '4.0.13';
     // HMAC 签名防重放（V4.0.14 引入）：只有能计算签名（crypto.subtle 可用）时才宣告
     // 新版本并携带 X-Timestamp/X-Nonce/X-Signature；不能算就保持旧版本号，服务端按
@@ -1793,6 +1793,7 @@
     }
 
     function stopHelper() {
+        HEAL.reset();
         isHelperRunning = false;
         activeJoinState = null;
         clearInterval(monitorTimer);
@@ -1879,6 +1880,75 @@
         return callAPI('POST', '/play/finish', payload);
     }
 
+    // ===== 多级自愈（v4.0.19）：网络/API 失败自动重试 → 自动刷新页面 → 停止 =====
+    // 目标：挂机期间遇到瞬时网络抖动/服务端临时错误/连续播放失败时自动恢复；
+    // 刷新有次数上限与最小间隔防抖，多次仍失败则停止并给出明确文案，不无限循环。
+    const HEAL = {
+        NET_RETRY_DELAY_MS: 30000,        // 网络/API 失败重试间隔
+        MAX_NET_FAIL_BEFORE_REFRESH: 3,   // 连续失败触发页面刷新阈值
+        MAX_CONSECUTIVE_ABANDON: 5,       // 连续放弃（播放失败）触发页面刷新阈值
+        REFRESH_MIN_INTERVAL_MS: 120000,  // 两次刷新最小间隔（防抖）
+        MAX_REFRESH_PER_SEQUENCE: 2,      // 单次故障序列刷新上限
+        WINDOW_POLL_MS: 60000,            // docker 活跃窗口外轮询间隔
+        netFail: 0,                       // 连续网络/API 失败计数
+        abandonStreak: 0,                 // 连续放弃计数
+        refreshCount: 0,                  // 本序列已刷新次数
+        lastRefreshAt: 0,                 // 上次刷新时间戳（防抖）
+        reset() {
+            HEAL.netFail = 0;
+            HEAL.abandonStreak = 0;
+            HEAL.refreshCount = 0;
+            HEAL.lastRefreshAt = 0;
+        },
+        clearFail() {
+            if (HEAL.netFail || HEAL.abandonStreak || HEAL.refreshCount) {
+                HEAL.netFail = 0;
+                HEAL.abandonStreak = 0;
+                HEAL.refreshCount = 0;
+                HEAL.lastRefreshAt = 0;
+            }
+        }
+    };
+
+    function scheduleHeal(kind) {
+        if (!isHelperRunning) return;
+        if (kind === 'window_wait') {
+            // docker 活跃窗口外：等待窗口开启，轮询不停止、不刷新
+            setTimeout(playNext, HEAL.WINDOW_POLL_MS);
+            return;
+        }
+        // net_fail / api_err：累计失败次数，达到阈值升级为页面刷新
+        HEAL.netFail += 1;
+        if (HEAL.netFail >= HEAL.MAX_NET_FAIL_BEFORE_REFRESH) {
+            performPageReload('网络/服务持续异常');
+        } else {
+            setTimeout(playNext, HEAL.NET_RETRY_DELAY_MS);
+        }
+    }
+
+    function performPageReload(reason) {
+        const now = Date.now();
+        if (now - HEAL.lastRefreshAt < HEAL.REFRESH_MIN_INTERVAL_MS) {
+            // 距上次刷新太近（防抖）：继续重试而不是再刷新
+            setTimeout(playNext, HEAL.NET_RETRY_DELAY_MS);
+            return;
+        }
+        if (HEAL.refreshCount >= HEAL.MAX_REFRESH_PER_SEQUENCE) {
+            // 刷新已达上限：停止循环，给出明确文案，不无限循环
+            try { stopHelper(); } catch (e) {}
+            const el = document.getElementById('helper-info');
+            if (el) el.innerText = '多次尝试后仍无法恢复，已自动停止；请检查网络/账号后手动开启';
+            return;
+        }
+        HEAL.refreshCount += 1;
+        HEAL.lastRefreshAt = now;
+        // 保证刷新后自动重启：强制写 autoStart=1（三端各自存储封装）
+        try { GM_setValue('autoStart', '1'); } catch (e) {}
+        const el = document.getElementById('helper-info');
+        if (el) el.innerText = `${reason}，正在自动刷新页面重试...（${HEAL.refreshCount}/${HEAL.MAX_REFRESH_PER_SEQUENCE}）`;
+        setTimeout(() => { try { location.reload(); } catch (e) {} }, 500);
+    }
+
     async function playNext() {
         if (!isHelperRunning) return;
         clearInterval(monitorTimer);
@@ -1891,16 +1961,22 @@
         }
         if(!data) {
             await idleCleanupPlaybackBestEffort();
-            infoEl.innerText = '服务器连接失败';
-            return;
+            infoEl.innerText = '服务器连接失败，30 秒后自动重试...';
+            return scheduleHeal('net_fail');
         }
         if (isApiErrorPayload(data)) {
             await idleCleanupPlaybackBestEffort();
-            if (!isServicePauseError(data.error)) {
-                infoEl.innerText = getPayloadErrorText(data, 'next_failed');
+            if (isServicePauseError(data.error)) {
+                return; // 停服类：保持现状（由停服处理流程负责），不自动重试
             }
-            return;
+            if (data.error === 'outside_active_window') {
+                infoEl.innerText = '当前不在活跃窗口内，1 分钟后自动重试...';
+                return scheduleHeal('window_wait');
+            }
+            infoEl.innerText = getPayloadErrorText(data, 'next_failed') + '，30 秒后自动重试...';
+            return scheduleHeal('api_err');
         }
+        HEAL.clearFail();
         if (data.participant) updateParticipantInfo(data.participant);
 
         if (data.musicId) {
@@ -1932,6 +2008,13 @@
                     result = null;
                 }
                 if (result && result.ok) {
+                    // 连续放弃计数：达到阈值升级为自动刷新页面（重新解析歌曲后重来）
+                    HEAL.abandonStreak += 1;
+                    if (HEAL.abandonStreak >= HEAL.MAX_CONSECUTIVE_ABANDON) {
+                        infoEl.innerText = '连续多次播放失败，正在自动刷新页面重试...';
+                        performPageReload('连续多次播放失败');
+                        return;
+                    }
                     infoEl.innerText = `已主动放弃当前任务（${reason}），继续下一单...`;
                     playNext();
                 } else {

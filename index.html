@@ -50,7 +50,7 @@
 <div class="wrap">
   <header>
     <h1>🎵 网易云音乐互助</h1>
-    <p>使用说明 · 当前版本 <b>v4.0.16</b>（2026-08-16）</p>
+    <p>使用说明 · 当前版本 <b>v4.0.19</b>（2026-08-20）</p>
     <p><a class="btn" href="https://163music.linyu.qzz.io/portal">个人中心</a></p>
   </header>
 
@@ -80,14 +80,14 @@
       <h3>方式二：浏览器扩展（无需油猴）</h3>
       <p>扩展是油猴脚本的独立移植版，<b>不需要安装 Tampermonkey</b>。额外功能：<b>开机自启</b> + <b>标签静音</b>（只静音网易云音乐标签，其它标签不碰）。</p>
       <ol>
-        <li>下载最新安装包 <code>163help-extension-v4.0.18.zip</code>（<b>最新版直接下载</b>，无需 GitHub）</li>
+        <li>下载最新安装包 <code>163help-extension-v4.0.19.zip</code>（<b>最新版直接下载</b>，无需 GitHub）</li>
         <li>解压，会得到一个 <code>extension/</code> 文件夹</li>
         <li>Chrome 打开 <code>chrome://extensions</code>，点击右上角「开发者模式」</li>
         <li>点「加载已解压的扩展程序」，选择 <code>extension/</code> 文件夹（就是直接包含 <code>manifest.json</code> 的那一层）</li>
       </ol>
       <div class="install">
-        <a class="btn" href="/163help-extension-v4.0.18.zip?v=20260816c">下载 163help-extension-v4.0.18.zip</a>
-        <code>/163help-extension-v4.0.18.zip?v=20260816c</code>
+        <a class="btn" href="/163help-extension-v4.0.19.zip?v=20260816c">下载 163help-extension-v4.0.19.zip</a>
+        <code>/163help-extension-v4.0.19.zip?v=20260816c</code>
       </div>
       <p class="tip">提示：扩展和油猴是两套独立存储，切换过去需要重新登录一次。</p>
     </div>
@@ -95,7 +95,7 @@
 
   <section>
     <h2>二、Docker 常驻客户端（VPS 24 小时在线互助）</h2>
-    <p>把客户端放进 Docker 容器，在 VPS 上 <b>24 小时常驻互助</b>——无需打开浏览器，无头浏览器（Playwright Chromium）真实播放，一个容器 = 一个网易云账号。当前 Docker 客户端版本 <b>v4.0.18</b>。</p>
+    <p>把客户端放进 Docker 容器，在 VPS 上 <b>24 小时常驻互助</b>——无需打开浏览器，无头浏览器（Playwright Chromium）真实播放，一个容器 = 一个网易云账号。当前 Docker 客户端版本 <b>v4.0.19</b>。</p>
 
     <h3>一键脚本（自动选择镜像通道）</h3>
     <p class="choice-tip">脚本默认先试 GitHub GHCR、失败自动切换 Cloudflare CDN；国内 VPS 可用 <code>IMAGE_SOURCE=cdn</code> 强制走 CDN（免登录，更稳）。</p>
