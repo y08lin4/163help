@@ -109,7 +109,7 @@ function GM_xmlhttpRequest(options) {
         })
         .catch(function () { vipTypeCache = 0; return 0; });
     }
-    const SIGN_VERSION = '4.0.19'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
+    const SIGN_VERSION = '4.0.20'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
     const LEGACY_VERSION = '4.0.13';
     // HMAC 签名防重放（V4.0.14 引入）：只有能计算签名（crypto.subtle 可用）时才宣告
     // 新版本并携带 X-Timestamp/X-Nonce/X-Signature；不能算就保持旧版本号，服务端按
@@ -160,6 +160,14 @@ function GM_xmlhttpRequest(options) {
     let currentParticipantCredits = null;
     let updateAvailable = false;
     let autoStartTriggered = false;
+    // 4.0.20：歌曲元数据权威 map（/api/me musics，musicId → {name, durationMs}），
+    // 供折叠摘要即时渲染；refreshMe 时刷新，缺失时回退本地缓存/异步解析。
+    let songMetaMap = null;
+    // 4.0.20：N1 每日预计消耗数据源 —— 槽位歌曲最长时长（秒级口径）与每日被助上限生效值
+    let currentMaxSongDurationMs = 0;
+    let currentTodayReceivedLimit = 30; // 旧后端不下发时兜底 30（与服务端默认一致）
+    // 4.0.20：歌曲修改是否处于「待审核」态（saveSongs 返回 pending / refreshMe /songs status=pending）
+    let savedSongsPendingReview = false;
 
     const TAB_INSTANCE_ID = getOrCreateTabInstanceId();
 
@@ -952,7 +960,159 @@ function GM_xmlhttpRequest(options) {
         }
     }
 
-    // 按 songSlotLimit 重新渲染槽位输入框；保留用户已填写的值，新增槽位以已保存歌单补位
+    // 4.0.20：紧凑时长格式（去掉前导 0）：200000ms → 3:20
+    function formatCompactMs(ms) {
+        if (isNaN(ms) || ms <= 0) return '--:--';
+        const s = Math.floor(ms / 1000);
+        return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    }
+
+    // 4.0.20 N2：歌名/时长三级数据源快照 —— ①refreshMe 的 d.musics（权威）→ ②本地缓存 → ③null（触发异步解析）
+    function getSongMetaSnapshot(musicIdText) {
+        const bare = String(musicIdText || '').trim().replace(/^song:/, '');
+        if (!/^\d+$/.test(bare)) return null;
+        if (songMetaMap) {
+            const hit = songMetaMap['song:' + bare] || songMetaMap[bare];
+            if (hit) return { name: String(hit.name || ''), durationMs: Number(hit.durationMs || 0) };
+        }
+        const cached = getCachedSongMeta('song:' + bare);
+        if (cached) return { name: String(cached.name || ''), durationMs: Number(cached.durationMs || 0) };
+        return null;
+    }
+
+    // 4.0.20 N2：对歌名/时长未知的歌曲异步解析（fetchSongDuration 内部写缓存），完成后回调 refresh()。
+    // 只对快照缺失的 id 发起请求（in-flight 去重，双态渲染切换不重复请求）；
+    // 解析完成后再渲染即为缓存命中，不会重复请求。
+    const songMetaRefillInflight = new Set();
+    // 会话级负缓存：解析失败/无进展的 id 不再反复请求（网络长期故障时防重复轰炸）
+    const songMetaRefillFailed = new Set();
+    function scheduleSongMetaRefill(refresh) {
+        const ids = new Set();
+        const collect = (text) => {
+            const bare = String(text || '').trim().replace(/^song:/, '');
+            if (/^\d+$/.test(bare)) ids.add(bare);
+        };
+        String(GM_getValue('myMusicList', '') || '').split('\n').forEach(collect);
+        for (let i = 1; i <= songSlotLimit; i += 1) {
+            const el = document.getElementById('my-music-slot-' + i);
+            if (el) collect(el.value);
+        }
+        let pending = 0;
+        ids.forEach((id) => {
+            if (getSongMetaSnapshot(id)) return;
+            if (songMetaRefillInflight.has(id)) return;
+            if (songMetaRefillFailed.has(id)) return;
+            pending += 1;
+            songMetaRefillInflight.add(id);
+            fetchSongDuration(id).then(() => {
+                songMetaRefillInflight.delete(id);
+                // 仅在解析有进展（缓存已写入）时触发刷新，避免网络失败时形成「失败→重渲染→再请求」循环
+                if (getSongMetaSnapshot(id)) { try { refresh(); } catch (e) {} }
+                else { songMetaRefillFailed.add(id); }
+            }).catch(() => { songMetaRefillInflight.delete(id); songMetaRefillFailed.add(id); });
+        });
+        return pending;
+    }
+
+    // 4.0.20 N2：折叠态摘要渲染 —— 摘要行「N 首 · 最长 m:ss · 合计 m:ss」+ 逐行「序号. 歌名 时长 状态徽标」（无 ID）
+    function renderSongSlotsSummary() {
+        const bar = document.getElementById('slot-summary-bar');
+        const textEl = document.getElementById('slot-summary-text');
+        const listEl = document.getElementById('slot-summary-list');
+        if (!bar || !textEl || !listEl) return;
+        const savedLines = String(GM_getValue('myMusicList', '') || '').split('\n').map(function (s) { return s.trim(); }).filter(Boolean);
+        if (savedLines.length === 0) {
+            textEl.textContent = '暂无已保存歌曲';
+            listEl.innerHTML = '';
+            listEl.style.display = 'none';
+            return;
+        }
+        let totalMs = 0, maxMs = 0, known = 0, missing = 0;
+        savedLines.forEach(function (line) {
+            const meta = getSongMetaSnapshot(line);
+            if (meta && meta.durationMs > 0) {
+                totalMs += meta.durationMs;
+                maxMs = Math.max(maxMs, meta.durationMs);
+                known += 1;
+            } else if (!meta) {
+                missing += 1;
+            }
+        });
+        textEl.textContent = `已保存 ${savedLines.length} 首 · 最长 ${known > 0 ? formatCompactMs(maxMs) : '--:--'} · 合计 ${known > 0 ? formatCompactMs(totalMs) : '--:--'}`;
+        listEl.innerHTML = '';
+        // 审核中徽标仅表示歌曲保存待审（槽位申请 pending 与歌曲审核态无关）
+        const pendingReview = savedSongsPendingReview;
+        const frag = document.createDocumentFragment();
+        savedLines.forEach(function (line, idx) {
+            const meta = getSongMetaSnapshot(line);
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex; align-items:center; gap:4px; font-size:12px; line-height:1.6; color:var(--text-secondary);';
+            const num = document.createElement('span');
+            num.style.cssText = 'color:var(--text-muted);';
+            num.textContent = (idx + 1) + '.';
+            const name = document.createElement('span');
+            name.style.cssText = 'flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;';
+            name.textContent = meta && meta.name ? meta.name : '…';
+            const dur = document.createElement('span');
+            dur.style.cssText = 'color:var(--text-muted);';
+            // 已解析（有缓存/权威数据）但时长为 0（不可播等）→ 不显示时长；未解析 → 「…」
+            dur.textContent = meta ? (meta.durationMs > 0 ? formatCompactMs(meta.durationMs) : '') : '…';
+            const badge = document.createElement('span');
+            badge.style.cssText = 'flex-shrink:0; font-size:11px; ' + (pendingReview ? 'color:var(--warn);' : 'color:var(--ok);');
+            badge.textContent = pendingReview ? '⏳审核中' : '✓生效';
+            row.appendChild(num);
+            row.appendChild(name);
+            row.appendChild(dur);
+            row.appendChild(badge);
+            frag.appendChild(row);
+        });
+        listEl.appendChild(frag);
+        listEl.style.display = 'block';
+        if (missing > 0) scheduleSongMetaRefill(renderSongSlotsSummary);
+    }
+
+    // 4.0.20 N2：展开态歌名/时长标签原位刷新（不重建输入框，避免打断用户输入）
+    function refreshSlotMetaLabels() {
+        const container = document.getElementById('my-music-slots');
+        if (!container) return;
+        for (let i = 1; i <= songSlotLimit; i += 1) {
+            const el = document.getElementById('my-music-slot-' + i);
+            const meta = container.querySelector('.slot-meta-el[data-slot="' + i + '"]');
+            if (!el || !meta) continue;
+            const snap = getSongMetaSnapshot(el.value);
+            if (snap) {
+                const parts = [];
+                if (snap.name) parts.push(snap.name);
+                if (snap.durationMs > 0) parts.push(formatCompactMs(snap.durationMs));
+                meta.textContent = parts.join(' ');
+            } else if (String(el.value || '').trim()) {
+                meta.textContent = '…';
+            } else {
+                meta.textContent = '';
+            }
+        }
+    }
+
+    // 4.0.20 N2：折叠/展开双态渲染入口 —— 输入框始终存在（getSongSlots/saveSongs/toggleHelper 依赖），只切换可见性；
+    // 折叠态渲染摘要（读 GM myMusicList），展开态渲染完整槽位（歌名·时长·ID 输入框可改 + 删除 + 底部新增槽）
+    function renderSongSlotsUI() {
+        renderSongSlots();
+        const collapsed = GM_getValue('songSlotsCollapsed', '1') === '1';
+        const bar = document.getElementById('slot-summary-bar');
+        const slots = document.getElementById('my-music-slots');
+        const hint = document.getElementById('slot-hint');
+        const addRow = document.getElementById('slot-add-row');
+        const expandBtn = document.getElementById('slot-expand-btn');
+        if (bar) bar.style.display = collapsed ? 'block' : 'none';
+        if (slots) slots.style.display = collapsed ? 'none' : 'block';
+        if (hint) hint.style.display = collapsed ? 'none' : 'block';
+        if (addRow) addRow.style.display = collapsed ? 'none' : 'flex';
+        if (expandBtn) expandBtn.innerText = collapsed ? '展开编辑 ▾' : '收起 ▴';
+        if (collapsed) renderSongSlotsSummary();
+    }
+
+    // 按 songSlotLimit 重新渲染槽位输入框；保留用户已填写的值，新增槽位以已保存歌单补位。
+    // 4.0.20 N2：每行 = 歌名·时长标签 + ID 输入框（可改）+ 删除按钮；setSongSlots/getSongSlots/songSlotsToText 语义不变。
     function renderSongSlots() {
         const container = document.getElementById('my-music-slots');
         if (!container) return;
@@ -965,14 +1125,55 @@ function GM_xmlhttpRequest(options) {
         }
         container.innerHTML = '';
         for (let i = 1; i <= songSlotLimit; i += 1) {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex; align-items:center; gap:4px; margin-bottom:4px;';
+            const meta = document.createElement('span');
+            meta.className = 'slot-meta-el';
+            meta.setAttribute('data-slot', String(i));
+            meta.style.cssText = 'flex-shrink:0; font-size:11px; color:var(--text-muted); min-width:52px; max-width:52px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;';
             const input = document.createElement('input');
             input.id = 'my-music-slot-' + i;
             input.type = 'text';
             input.placeholder = '槽位 ' + i;
             input.value = oldValues[i] || '';
-            input.style.cssText = 'margin-bottom:4px;';
-            container.appendChild(input);
+            input.style.cssText = 'flex:1; min-width:0;';
+            // 输入时即时刷新该行歌名/时长标签；未知 id 触发异步解析
+            input.addEventListener('input', function () {
+                const snap = getSongMetaSnapshot(input.value);
+                if (snap) {
+                    const parts = [];
+                    if (snap.name) parts.push(snap.name);
+                    if (snap.durationMs > 0) parts.push(formatCompactMs(snap.durationMs));
+                    meta.textContent = parts.join(' ');
+                } else {
+                    meta.textContent = String(input.value || '').trim() ? '…' : '';
+                }
+                if (String(input.value || '').trim() && !snap) scheduleSongMetaRefill(refreshSlotMetaLabels);
+            });
+            const delBtn = document.createElement('button');
+            delBtn.type = 'button';
+            delBtn.innerText = '✕';
+            delBtn.title = '删除此槽';
+            delBtn.style.cssText = 'flex-shrink:0; background:var(--bg-muted); color:var(--text-muted); padding:2px 6px; font-size:11px;';
+            delBtn.onclick = function () {
+                input.value = '';
+                renderSongSlots();
+            };
+            row.appendChild(meta);
+            row.appendChild(input);
+            row.appendChild(delBtn);
+            container.appendChild(row);
+            const snap = getSongMetaSnapshot(oldValues[i]);
+            if (snap) {
+                const parts = [];
+                if (snap.name) parts.push(snap.name);
+                if (snap.durationMs > 0) parts.push(formatCompactMs(snap.durationMs));
+                meta.textContent = parts.join(' ');
+            } else if (oldValues[i]) {
+                meta.textContent = '…';
+            }
         }
+        scheduleSongMetaRefill(refreshSlotMetaLabels);
     }
 
     // 规范化后比较（已保存文本与 3 槽位文本做语义对比，忽略 song: 前缀/空行差异）
@@ -1020,24 +1221,73 @@ function GM_xmlhttpRequest(options) {
                     </div>
                 </div>
                 <div id="helper-body">
-                    <div id="risk-notice" style="${riskAccepted ? 'display:none' : 'display:block'}; white-space:pre-line; font-size:12px; margin-bottom:8px; padding:8px; border-radius:var(--radius); background:#fff7e6; border:1px solid #ffd591; color:var(--warn); line-height:1.5;"></div>
+                    <div id="risk-notice" style="${riskAccepted ? 'display:none' : 'display:block'}; white-space:pre-line; font-size:12px; margin-bottom:8px; padding:8px; border-radius:var(--radius); background:var(--warn-bg); border:1px solid var(--warn-line); color:var(--warn); line-height:1.5;"></div>
                     <button id="risk-accept-btn" class="btn-primary" style="${riskAccepted ? 'display:none' : 'display:block'}; width:100%; margin-bottom:8px; padding:8px;">我已阅读并确认</button>
                     <div id="login-status" style="font-size:12px; margin-bottom:8px; color:var(--text-secondary);">${token ? '检测登录中...' : '未登录'}</div>
                     <div id="auth-section" style="${token || !riskAccepted ? 'display:none' : 'display:block'}">
                         <button id="login-linuxdo" class="btn-primary" style="width:100%; padding:8px;">登录 Linux.do</button>
                         <button id="update-script-btn" class="btn-primary" style="display:none; margin-top:8px; width:100%; padding:8px;">更新扩展</button>
                     </div>
+                    <!-- 4.0.20 P1：状态区（状态灯 + helper-info 文案，状态色随 setHelperInfoStyle 同步） -->
+                    <div id="status-section" class="panel-section panel-section-first">
+                        <div class="section-label">状态</div>
+                        <div style="display:flex; align-items:flex-start; gap:6px;">
+                            <span id="status-dot" style="flex-shrink:0; width:8px; height:8px; margin-top:6px; border-radius:50%; background:var(--text-muted);"></span>
+                            <div id="helper-info" style="flex:1; min-width:0; white-space:pre-line; font-size:12px; padding:6px 8px; border-radius:var(--radius); background:var(--bg-soft); border:1px solid var(--line); color:var(--text-secondary); line-height:1.5;">就绪...</div>
+                        </div>
+                    </div>
+                    <!-- 4.0.20 P1：统计区（helper-stats + N1 每日预计消耗常驻行） -->
+                    <div id="stats-section" class="panel-section">
+                        <div class="section-label">统计</div>
+                        <div id="helper-stats" style="display:none; white-space:pre-line; font-size:12px; padding:8px; border-radius:var(--radius); background:var(--bg-soft); border:1px solid var(--line); color:var(--text-secondary); line-height:1.5;"></div>
+                        <div id="daily-consume-line" style="display:none; margin-top:6px; padding:6px 8px; border-radius:var(--radius); background:var(--bg-muted); border:1px dashed var(--line); color:var(--text-muted); font-size:11px; line-height:1.5;"></div>
+                    </div>
                     <div id="helper-form" style="${token && riskAccepted ? 'display:block' : 'display:none'}">
-                        <div style="margin-bottom:8px;">
-                            <div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">歌曲 ID（每槽一个，如 song:123 或纯数字；留空槽位=不挂载）</div>
+                        <!-- 4.0.20 P1：操作区（槽位折叠摘要 + 槽位编辑 + 偏好/自动开启 + 保存/开启） -->
+                        <div id="ops-section" class="panel-section">
+                            <div class="section-label">歌曲</div>
+                            <!-- 4.0.20 N2：折叠摘要区（默认折叠，保存后自动折叠；展开态隐藏） -->
+                            <div id="slot-summary-bar" style="display:none; margin-bottom:6px; padding:6px 8px; border-radius:var(--radius); background:var(--bg-soft); border:1px solid var(--line);">
+                                <div style="display:flex; align-items:center; justify-content:space-between; gap:6px;">
+                                    <span id="slot-summary-text" style="font-size:12px; color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;"></span>
+                                    <button id="slot-expand-btn" type="button" style="flex-shrink:0; background:var(--bg-muted); color:var(--text-secondary); padding:2px 8px;">展开编辑 ▾</button>
+                                </div>
+                                <div id="slot-summary-list" style="display:none; margin-top:4px;"></div>
+                            </div>
+                            <div id="slot-hint" style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">歌曲 ID（每槽一个，如 song:123 或纯数字；留空槽位=不挂载）</div>
                             <div id="my-music-slots" style="margin-bottom:4px;"></div>
-                            <div id="slot-apply-section" style="margin-top:6px; font-size:12px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
+                            <!-- 4.0.20 N2：展开态底部新增槽 -->
+                            <div id="slot-add-row" style="display:none; margin-bottom:4px;">
+                                <div style="display:flex; gap:4px;">
+                                    <input id="new-slot-input" type="text" placeholder="新增歌曲 ID（song:123 或纯数字）" style="flex:1;">
+                                    <button id="slot-add-btn" type="button" style="background:var(--bg-muted); color:var(--text-secondary); padding:4px 10px;">添加</button>
+                                </div>
+                            </div>
+                            <div style="display:flex; gap:8px; margin-top:8px; margin-bottom:8px; align-items:center;">
+                                <select id="my-preference" style="flex:1; background:var(--bg-muted);">
+                                    <option value="random" ${savedPreference === 'random' ? 'selected' : ''}>随机</option>
+                                    <option value="short" ${savedPreference === 'short' ? 'selected' : ''}>短歌优先</option>
+                                    <option value="long" ${savedPreference === 'long' ? 'selected' : ''}>长歌优先</option>
+                                </select>
+                                <label style="display:flex; align-items:center; gap:4px; font-size:12px; color:var(--text-secondary); white-space:nowrap;">
+                                    <input type="checkbox" id="auto-start" ${autoStart === '1' ? 'checked' : ''}> 自动开启
+                                </label>
+                            </div>
+                            <div style="display:flex; gap:8px;">
+                                <button id="save-songs" class="btn-primary" style="flex:1; padding:8px;">保存</button>
+                                <button id="toggle-helper" class="btn-primary" style="flex:1; padding:8px;">开启互助</button>
+                            </div>
+                        </div>
+                        <!-- 4.0.20 P1：申请入口（槽位/限额折叠表单，保持原 DOM id 与事件绑定不变） -->
+                        <div id="apply-section" class="panel-section">
+                            <div class="section-label">申请</div>
+                            <div id="slot-apply-section" style="font-size:12px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
                                 <a id="slot-apply-link" style="color:var(--link); cursor:pointer; text-decoration:underline;">申请增加槽位</a>
                                 <span id="slot-apply-pending" style="display:none; color:var(--warn);">槽位申请审核中</span>
                             </div>
                             <div id="slot-apply-form" style="display:none; margin-top:6px;">
                                 <input id="slot-apply-count" type="number" min="1" max="10" placeholder="申请增加几个槽位（1~10）" style="margin-bottom:4px;">
-                                <textarea id="slot-apply-reason" placeholder="理由（必填）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:#fff; color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px; resize:vertical;"></textarea>
+                                <textarea id="slot-apply-reason" placeholder="理由（必填）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:var(--input-bg); color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px; resize:vertical;"></textarea>
                                 <div style="display:flex; gap:8px;">
                                     <button id="slot-apply-submit" class="btn-primary" style="flex:1; padding:6px;">提交申请</button>
                                     <button id="slot-apply-cancel" style="flex:1; padding:6px; background:var(--bg-muted); color:var(--text-secondary);">取消</button>
@@ -1048,63 +1298,60 @@ function GM_xmlhttpRequest(options) {
                                 <span id="limit-apply-pending" style="display:none; color:var(--warn);">限额申请审核中</span>
                             </div>
                             <div id="limit-apply-form" style="display:none; margin-top:6px;">
-                                <input id="limit-apply-daily" type="number" min="1" max="999" placeholder="每日被助上限（1~999）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:#fff; color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px;">
-                                <input id="limit-apply-monthly" type="number" min="1" max="99999" placeholder="每月被助上限（1~99999）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:#fff; color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px;">
+                                <input id="limit-apply-daily" type="number" min="1" max="999" placeholder="每日被助上限（1~999）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:var(--input-bg); color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px;">
+                                <input id="limit-apply-monthly" type="number" min="1" max="99999" placeholder="每月被助上限（1~99999）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:var(--input-bg); color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px;">
                                 <input id="limit-apply-url" type="text" placeholder="网易云主页链接（必填，http/https）" style="margin-bottom:4px;">
-                                <textarea id="limit-apply-reason" placeholder="理由（必填）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:#fff; color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px; resize:vertical;"></textarea>
+                                <textarea id="limit-apply-reason" placeholder="理由（必填）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:var(--input-bg); color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px; resize:vertical;"></textarea>
                                 <div style="display:flex; gap:8px;">
                                     <button id="limit-apply-submit" class="btn-primary" style="flex:1; padding:6px;">提交申请</button>
                                     <button id="limit-apply-cancel" style="flex:1; padding:6px; background:var(--bg-muted); color:var(--text-secondary);">取消</button>
                                 </div>
                             </div>
                         </div>
-                        <div style="display:flex; gap:8px; margin-bottom:8px; align-items:center;">
-                            <select id="my-preference" style="flex:1; background:var(--bg-muted);">
-                                <option value="random" ${savedPreference === 'random' ? 'selected' : ''}>随机</option>
-                                <option value="short" ${savedPreference === 'short' ? 'selected' : ''}>短歌优先</option>
-                                <option value="long" ${savedPreference === 'long' ? 'selected' : ''}>长歌优先</option>
-                            </select>
-                            <label style="display:flex; align-items:center; gap:4px; font-size:12px; color:var(--text-secondary); white-space:nowrap;">
-                                <input type="checkbox" id="auto-start" ${autoStart === '1' ? 'checked' : ''}> 自动开启
-                            </label>
-                        </div>
-                        <div style="display:flex; gap:8px;">
-                            <button id="save-songs" class="btn-primary" style="flex:1; padding:8px;">保存</button>
-                            <button id="toggle-helper" class="btn-primary" style="flex:1; padding:8px;">开启互助</button>
-                        </div>
                     </div>
-                    <div id="helper-stats" style="display:none; white-space:pre-line; font-size:12px; margin-top:8px; padding:8px; border-radius:var(--radius); background:var(--bg-soft); border:1px solid var(--line); color:var(--text-secondary); line-height:1.5;"></div>
-                    <div id="helper-info" style="display:none; white-space:pre-line; font-size:12px; margin-top:8px; padding:8px; border-radius:var(--radius); background:var(--bg-soft); border:1px solid var(--line); color:var(--text-secondary); line-height:1.5;">就绪...</div>
                     <button id="manual-btn" class="btn-primary" style="display:none; width:100%; margin-top:8px; padding:8px; animation: blink 1s infinite;">点我激活播放</button>
                 </div>
             </div>
         `;
         document.body.appendChild(container);
-        renderSongSlots();
+        renderSongSlotsUI();
         GM_addStyle(`
             #music-helper-container {
                 --brand:#c20c0c; --brand-hover:#9b0a0a; --ok:#14804a; --bad:#d93025; --warn:#9a6700;
                 --disabled:#999999; --panel:#ffffff; --line:#e3e8ef; --text:#333333;
                 --text-secondary:#666666; --text-muted:#999999; --link:#1890ff; --bg-muted:#f5f6f8; --bg-soft:#f7f8fa;
+                --ok-bg:#e8f5ee; --ok-line:#bfe5cf; --warn-bg:#fff7e6; --warn-line:#ffd591; --input-bg:#ffffff;
                 --radius:6px; --radius-lg:10px;
                 position: fixed; top: 100px; right: 20px; z-index: 1000000;
                 font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
                 font-size: 12px; user-select: none;
             }
+            /* 4.0.20 P1：暗色适配 —— 整套变量翻转（面板/文字/边框/输入底/警告与成功浅色底） */
+            @media (prefers-color-scheme: dark) {
+                #music-helper-container {
+                    --panel:#1e1e1e; --line:#3a3a3a; --text:#e5e5e5; --text-secondary:#b8b8b8; --text-muted:#8f8f8f;
+                    --bg-muted:#262626; --bg-soft:#232323; --link:#4da3ff; --ok:#3fae6e; --bad:#e05252; --warn:#d9a04b;
+                    --ok-bg:#122a1c; --ok-line:#245636; --warn-bg:#2b2110; --warn-line:#5c4a1c; --input-bg:#2a2a2a;
+                }
+            }
             #music-helper-panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg); box-shadow: 0 8px 24px rgba(0,0,0,0.2); width: 220px; overflow: hidden; }
             #helper-header { background: var(--bg-muted); padding: 10px; display: flex; justify-content: space-between; align-items: center; cursor: move; }
             #helper-body { padding: 12px; }
+            /* 4.0.20 P1：三区分层（状态/统计/操作/申请）分隔线 + 分区小标题 */
+            #music-helper-container .panel-section { border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; }
+            #music-helper-container .panel-section-first { border-top: none; margin-top: 0; padding-top: 0; }
+            #music-helper-container .section-label { font-size: 11px; color: var(--text-muted); margin-bottom: 6px; letter-spacing: 0.5px; }
             #helper-toggle-btn { width: 44px; height: 44px; background: var(--brand); color: #fff; border-radius: 50%; display: none; align-items: center; justify-content: center; cursor: move; font-size: 20px; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
             #music-helper-container button { font-size: 12px; border: none; border-radius: var(--radius); cursor: pointer; transition: filter .15s ease, opacity .15s ease; }
             #music-helper-container button:hover { filter: brightness(0.92); }
             #music-helper-container button:active { filter: brightness(0.85); }
             #music-helper-container button:disabled { opacity: .6; cursor: not-allowed; }
             #music-helper-container .btn-primary { background: var(--brand); color: #fff; }
-            #music-helper-container input[type="text"], #music-helper-container select {
+            #music-helper-container input[type="text"], #music-helper-container select, #music-helper-container textarea {
                 width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: var(--radius);
-                background: #fff; color: var(--text); font-size: 12px; padding: 5px 6px;
+                background: var(--input-bg); color: var(--text); font-size: 12px; padding: 5px 6px;
             }
-            #music-helper-container input[type="text"]:focus, #music-helper-container select:focus { outline: none; border-color: var(--brand); }
+            #music-helper-container input[type="text"]:focus, #music-helper-container select:focus, #music-helper-container textarea:focus { outline: none; border-color: var(--brand); }
             @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.4} }
         `);
 
@@ -1159,6 +1406,33 @@ function GM_xmlhttpRequest(options) {
         };
         document.getElementById('toggle-helper').onclick = toggleHelper;
         document.getElementById('save-songs').onclick = saveSongs;
+        // 4.0.20 N2：折叠摘要 ⇄ 展开编辑切换（状态持久化到 songSlotsCollapsed）
+        document.getElementById('slot-expand-btn').onclick = () => {
+            const collapsed = GM_getValue('songSlotsCollapsed', '1') !== '1';
+            GM_setValue('songSlotsCollapsed', collapsed ? '1' : '0');
+            renderSongSlotsUI();
+        };
+        // 4.0.20 N2：展开态底部「新增槽」——把新 ID 填入第一个空槽位（不改变槽位输入框语义）
+        document.getElementById('slot-add-btn').onclick = () => {
+            const input = document.getElementById('new-slot-input');
+            const raw = String(input ? input.value || '' : '').trim();
+            if (input) input.value = '';
+            if (!raw) return;
+            const ids = parseSaveSongs(raw);
+            if (ids === null || ids.length !== 1) {
+                showHelperInfo('请输入单个歌曲 ID（song:数字 或纯数字）。', 'warn');
+                return;
+            }
+            for (let i = 1; i <= songSlotLimit; i += 1) {
+                const el = document.getElementById('my-music-slot-' + i);
+                if (el && !String(el.value || '').trim()) {
+                    el.value = ids[0];
+                    renderSongSlots();
+                    return;
+                }
+            }
+            showHelperInfo('槽位已满（最多 ' + songSlotLimit + ' 个），请先删除或保存。', 'warn');
+        };
         document.getElementById('slot-apply-link').onclick = () => {
             if (pendingSlotApplication) return;
             document.getElementById('slot-apply-form').style.display = 'block';
@@ -1230,7 +1504,7 @@ function GM_xmlhttpRequest(options) {
                 renderAnnouncement(d && d.announcement);
                 if(d && d.latestVersion && compareVersions(d.latestVersion, CURRENT_VERSION) > 0) {
                     const up = document.createElement('div');
-                    up.innerHTML = `<div style="background:#fffbe6; border:1px solid #ffe58f; padding:8px; border-radius:var(--radius); margin-bottom:8px; font-size:12px; color:var(--warn);">发现新版本 v${d.latestVersion}</div>`;
+                    up.innerHTML = `<div style="background:var(--warn-bg); border:1px solid var(--warn-line); padding:8px; border-radius:var(--radius); margin-bottom:8px; font-size:12px; color:var(--warn);">发现新版本 v${d.latestVersion}</div>`;
                     document.getElementById('helper-body').prepend(up);
                     showUpdateButton(`更新到 v${d.latestVersion}`);
                 }
@@ -1258,7 +1532,7 @@ function GM_xmlhttpRequest(options) {
         }
         const box = existing || document.createElement('div');
         box.id = 'helper-announcement';
-        box.style.cssText = 'white-space:pre-line;background:#fff7e6;border:1px solid #ffd591;padding:8px;border-radius:var(--radius);margin-bottom:8px;font-size:12px;color:var(--warn);line-height:1.5;';
+        box.style.cssText = 'white-space:pre-line;background:var(--warn-bg);border:1px solid var(--warn-line);padding:8px;border-radius:var(--radius);margin-bottom:8px;font-size:12px;color:var(--warn);line-height:1.5;';
         box.innerText = text;
         if (!existing) body.prepend(box);
     }
@@ -1566,6 +1840,23 @@ function GM_xmlhttpRequest(options) {
                 loginStatus.style.color = '';
                 loginStatus.onclick = null;
             }
+            // 4.0.20 N2/N1：/api/me musics 为歌名/时长权威源（零请求），存 map 供折叠摘要即时渲染；
+            // 同时计算槽位歌曲最长时长（N1 每日预计消耗口径，仅计入 durationMs>0 的歌曲）。
+            // 必须先于 updateParticipantInfo 执行，保证每日消耗常驻行首帧即用上新数据。
+            if (Array.isArray(d.musics)) {
+                songMetaMap = {};
+                let maxMs = 0;
+                d.musics.forEach(function (m) {
+                    if (!m || !m.musicId) return;
+                    const bare = String(m.musicId).replace(/^song:/, '');
+                    const dur = Number(m.durationMs || 0);
+                    const entry = { name: String(m.name || ''), durationMs: dur > 0 ? dur : 0 };
+                    songMetaMap['song:' + bare] = entry;
+                    songMetaMap[bare] = entry;
+                    if (dur > 0 && dur > maxMs) maxMs = dur;
+                });
+                currentMaxSongDurationMs = maxMs;
+            }
             updateParticipantInfo(d.participant);
             // 动态槽位上限：优先取 /api/me 下发的 song_slot_limit（user 或 participant 里都有），
             // 变化时重新渲染槽位输入框（保留已填内容）。旧后端不下发时保持默认 3。
@@ -1594,6 +1885,7 @@ function GM_xmlhttpRequest(options) {
             const songsRes = await callAPI('GET', '/songs');
             if (songsRes && songsRes.status === 'pending') {
                 // 修改待审核：不应用，保留旧歌曲
+                savedSongsPendingReview = true;
                 const infoEl = document.getElementById('helper-info');
                 if (infoEl && !isHelperRunning) {
                     infoEl.style.display = 'block';
@@ -1601,15 +1893,19 @@ function GM_xmlhttpRequest(options) {
                     setHelperInfoStyle('warn');
                 }
             } else if (songsRes && songsRes.songs != null && String(songsRes.songs).trim()) {
+                savedSongsPendingReview = false;
                 setSongSlots(String(songsRes.songs));
                 GM_setValue('myMusicList', String(songsRes.songs));
             } else if (Array.isArray(d.musics) && d.musics.length > 0 && !(GM_getValue('myMusicList', '') || '').trim()) {
+                savedSongsPendingReview = false;
                 const lines = d.musics.map(function (m) { return m.musicId || ''; }).filter(Boolean);
                 if (lines.length > 0) {
                     setSongSlots(lines.join('\n'));
                     GM_setValue('myMusicList', lines.join('\n'));
                 }
             }
+            // 4.0.20 N2：同步后刷新折叠摘要（歌名/时长/状态徽标随权威数据变化）
+            renderSongSlotsSummary();
             return;
         }
         // 登录态获取失败（网络异常等），且无其他错误提示覆盖时：可点击重试
@@ -1631,10 +1927,12 @@ function GM_xmlhttpRequest(options) {
         const statsEl = document.getElementById('helper-stats');
         const credits = Number(participant.available_credits != null ? participant.available_credits : participant.credits || 0);
         currentParticipantCredits = credits;
+        // 4.0.20 N1：每日被助上限生效值存模块变量（缺失不动旧值，初始兜底 30）
+        if (participant.today_received_limit != null) currentTodayReceivedLimit = Number(participant.today_received_limit);
         const todayReceived = Number(participant.today_received_help_count || 0);
         const todayReceivedLimit = Number(participant.today_received_limit || 0);
         const todayHelped = Number(participant.today_helped_count || 0);
-        const todayHelpedLimit = Number(participant.today_helped_limit ?? 200);
+        const todayHelpedLimit = Number(participant.today_helped_limit ?? 35);
         const monthlyReceived = Number(participant.monthly_received_help_count || 0);
         const monthlyLimit = Number(participant.monthly_received_limit || 0);
         const lines = [];
@@ -1647,24 +1945,62 @@ function GM_xmlhttpRequest(options) {
             statsEl.style.display = 'block';
             statsEl.innerText = lines.join('\n');
         }
+        // 4.0.20 N1：每日预计消耗常驻行（统计区，弱化背景；无歌/无上限/全 0 时隐藏）
+        renderDailyConsumptionLine();
+    }
+
+    // 4.0.20 N1：每日预计消耗 ≈ floor(最长歌秒) × 每日被助上限（today_received_limit 生效值，缺失兜底 30）。
+    // 积分=秒（与服务端 credit_cost 同构）；无歌/时长全 0/上限为 0 → 整行隐藏；字段缺失不报错。
+    function renderDailyConsumptionLine() {
+        const lineEl = document.getElementById('daily-consume-line');
+        if (!lineEl) return;
+        const maxMs = currentMaxSongDurationMs;
+        const dailyCount = currentTodayReceivedLimit;
+        if (!(maxMs > 0) || !(dailyCount > 0)) {
+            lineEl.style.display = 'none';
+            lineEl.textContent = '';
+            return;
+        }
+        const estimated = Math.floor(maxMs / 1000) * dailyCount;
+        let text = `每日预计消耗 ≈ ${estimated} 积分/天（最长歌 ${formatCompactMs(maxMs)} × 每日 ${dailyCount} 次）`;
+        if (currentParticipantCredits !== null && Number.isFinite(Number(currentParticipantCredits))) {
+            text += ` · 剩余 ${Number(currentParticipantCredits)} 积分`;
+        }
+        lineEl.style.display = 'block';
+        lineEl.textContent = text;
     }
 
     // helper-info 状态色分层：空闲/正常=中性，运行中=绿色，保存成功=绿色，错误/待审核=黄色。只改颜色不改文字。
+    // 4.0.20 P1：颜色全部走 CSS 变量（含暗色翻转），并同步状态灯 #status-dot 颜色。
     function setHelperInfoStyle(kind) {
         const infoEl = document.getElementById('helper-info');
-        if (!infoEl) return;
-        if (kind === 'running' || kind === 'success') {
-            infoEl.style.background = '#e8f5ee';
-            infoEl.style.borderColor = '#bfe5cf';
-            infoEl.style.color = 'var(--ok)';
-        } else if (kind === 'warn') {
-            infoEl.style.background = '#fff7e6';
-            infoEl.style.borderColor = '#ffd591';
-            infoEl.style.color = 'var(--warn)';
-        } else {
-            infoEl.style.background = 'var(--bg-soft)';
-            infoEl.style.borderColor = 'var(--line)';
-            infoEl.style.color = 'var(--text-secondary)';
+        if (infoEl) {
+            if (kind === 'running' || kind === 'success') {
+                infoEl.style.background = 'var(--ok-bg)';
+                infoEl.style.borderColor = 'var(--ok-line)';
+                infoEl.style.color = 'var(--ok)';
+            } else if (kind === 'warn') {
+                infoEl.style.background = 'var(--warn-bg)';
+                infoEl.style.borderColor = 'var(--warn-line)';
+                infoEl.style.color = 'var(--warn)';
+            } else {
+                infoEl.style.background = 'var(--bg-soft)';
+                infoEl.style.borderColor = 'var(--line)';
+                infoEl.style.color = 'var(--text-secondary)';
+            }
+        }
+        const dot = document.getElementById('status-dot');
+        if (dot) {
+            if (kind === 'running' || kind === 'success') {
+                dot.style.background = 'var(--ok)';
+                dot.style.boxShadow = '0 0 0 2px var(--ok-bg)';
+            } else if (kind === 'warn') {
+                dot.style.background = 'var(--warn)';
+                dot.style.boxShadow = '0 0 0 2px var(--warn-bg)';
+            } else {
+                dot.style.background = 'var(--text-muted)';
+                dot.style.boxShadow = '0 0 0 2px var(--bg-soft)';
+            }
         }
     }
 
@@ -1699,6 +2035,12 @@ function GM_xmlhttpRequest(options) {
         const underMonthly = Number(summary.underMonthlyLimit || 0);
         const underActiveJobs = Number(summary.underActiveJobLimit || 0);
         const notInCooldown = Number(summary.notInCooldown || 0);
+        // 4.0.20 P2（K4）：reason=contended 且明细七项计数全 0 → 服务端未下发明细（统计口径缺失），
+        // 输出简短兜底文案，不输出全 0 的误导明细行；其他 reason 行为保持不变。
+        if (reason === 'contended' && participants === 0 && notSelf === 0 && active === 0
+            && withCredit === 0 && underMonthly === 0 && underActiveJobs === 0 && notInCooldown === 0) {
+            return '目标竞争，稍后重试，30s 后自动继续。';
+        }
         const detail = `入队用户: ${participants}，非本人: ${notSelf}，正常: ${active}，有可用额度: ${withCredit}，未到月上限: ${underMonthly}，未超并发: ${underActiveJobs}，非冷却: ${notInCooldown}`;
         const reasonMap = {
             no_participants: '当前没人加入互助队列',
@@ -1849,8 +2191,18 @@ function GM_xmlhttpRequest(options) {
             showHelperInfo(d.message || getPayloadErrorText(d, 'save_failed'), 'warn');
             return null;
         }
+        // 保存按钮同时持久化「自动开启」勾选（此前只在点「开启互助」时才写入，勾选后点保存无反应）
+        const autoStartEl = document.getElementById('auto-start');
+        if (autoStartEl) GM_setValue('autoStart', autoStartEl.checked ? '1' : '0');
+        // 4.0.20 顺带①：保存按钮一并持久化偏好（对齐 toggleHelper 行为，此前仅 toggleHelper 落盘）
+        const preferenceEl = document.getElementById('my-preference');
+        if (preferenceEl) GM_setValue('myPreference', preferenceEl.value);
         GM_setValue('myMusicList', savedText);
         setSongSlots(savedText);
+        // 4.0.20 N2：记录歌曲审核态；保存成功后自动切换为折叠态（摘要展示，隐藏长 ID）
+        savedSongsPendingReview = d.status === 'pending';
+        GM_setValue('songSlotsCollapsed', '1');
+        renderSongSlotsUI();
         if (d.status === 'pending') {
             showHelperInfo(d.message || '已提交审核，待管理员审核。', 'warn');
         } else {
@@ -2197,7 +2549,10 @@ function GM_xmlhttpRequest(options) {
                     }
                 }
                 if (result && result.ok) {
-                    const credits = result.participant ? Number(result.participant.credits || 0) : null;
+                    // 4.0.20 顺带②：可用额度优先取 available_credits（与 updateParticipantInfo 口径一致），缺失兜底 credits
+                    const credits = result.participant
+                        ? Number(result.participant.available_credits != null ? result.participant.available_credits : result.participant.credits || 0)
+                        : null;
                     const credited = result.credited !== false;
                     const earnedCredits = Number(result.creditCost || creditCost || 0);
                     if (result.participant) updateParticipantInfo(result.participant);
