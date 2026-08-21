@@ -1,6 +1,6 @@
 # 163help 🎵
 
-> 当前版本：**v4.0.17**
+> 当前版本：**v4.0.20**
 
 网易云音乐互助播放的**客户端**仓库，提供三种独立客户端形态：**油猴脚本** / **Chrome 浏览器扩展** / **Docker 常驻客户端**（按需选择）。
 
@@ -38,7 +38,7 @@
 
 ### 方式 C：Docker 常驻客户端（VPS 24 小时在线互助）
 
-不需要打开浏览器，把客户端放进 Docker 容器，在 VPS 上 **24 小时常驻互助**：无头浏览器（Playwright Chromium）真实播放，一个容器 = 一个网易云账号。当前版本 **v4.0.18**，镜像已公开、匿名可拉取。
+不需要打开浏览器，把客户端放进 Docker 容器，在 VPS 上 **24 小时常驻互助**：无头浏览器（Playwright Chromium）真实播放，一个容器 = 一个网易云账号。当前版本 **v4.0.20**，镜像已公开、匿名可拉取。
 
 **一键脚本（自动选择镜像通道）**：脚本默认先试 GitHub GHCR、失败自动切换 Cloudflare CDN；国内 VPS 可 `IMAGE_SOURCE=cdn` 强制走 CDN（免登录、更稳）：
 
@@ -85,7 +85,7 @@ docker load -i /tmp/163music-docker-client.tar.gz
 - **数据持久化**：`-v ./data:/data`（cookie / store / 会话），升级不丢数据。
 - **升级**：`docker pull ghcr.io/y08lin4/163music-help/docker-client:latest` → `docker rm -f 163music-docker-client` → 用**相同数据卷**重新 `docker run`；或直接重跑一键脚本（自动重建容器）。
 - **常驻参数**：`--restart unless-stopped`（崩溃自动拉起）+ `--memory 1g`（防无头浏览器吃爆内存）+ `-e TZ=Asia/Shanghai`。
-- **镜像**：`ghcr.io/y08lin4/163music-help/docker-client`（tag：`latest` / `docker-v4.0.18`）。
+- **镜像**：`ghcr.io/y08lin4/163music-help/docker-client`（tag：`latest` / `docker-v4.0.20`）。
 - 支持每日活跃时间窗口（跨零点，上限 16 小时）、Docker Compose、VPS 一键脚本；完整说明见仓库 `client-docker/` 目录。
 ## 仓库结构
 
