@@ -145,7 +145,6 @@ function GM_xmlhttpRequest(options) {
     const PLAYBACK_STALL_MS = 40000; // 播放中进度持续不动（VIP 试听卡死等）判定的阈值，40 秒
     let songSlotLimit = 3; // 当前用户可挂歌槽位数（动态，来自 /api/me 的 song_slot_limit，默认 3）
     let pendingSlotApplication = false; // 是否存在待审核的槽位申请
-    let pendingLimitApplication = false; // 是否存在待审核的限额提升申请
 
     let isHelperRunning = false;
     let monitorTimer = null;
@@ -578,7 +577,7 @@ function GM_xmlhttpRequest(options) {
         if (code === 'registration_required') return '当前账号尚未完成注册，请先完成开通流程。';
         if (code === 'invalid_or_expired_token') return '登录态已失效，请重新登录。';
         if (code === 'tab_conflict') return '当前账号已经在另一个标签页运行，本页已停止服务。';
-        if (code === 'client_upgrade_required') return '当前脚本版本过旧，请先更新到最新版本后再继续使用。';
+        if (code === 'client_upgrade_required') return '你的脚本版本过低，请更新。';
         if (code === 'service_paused') return '服务已暂停，请稍后再试。';
         if (code === 'service_manual_blocked') return '服务已被管理员临时暂停，请稍后再试。';
         if (code === 'service_d1_blocked') return '网络环境不稳定，暂停互助一个小时';
@@ -711,8 +710,8 @@ function GM_xmlhttpRequest(options) {
         const requiredText = normalizeVersion(requiredVersion) || (authConfig && authConfig.minSupportedVersion) || '';
         const latestText = normalizeVersion(latestVersion) || (authConfig && authConfig.latestVersion) || '';
         const title = requiredText
-            ? `脚本版本过旧，最低支持版本为 v${requiredText}`
-            : '脚本版本过旧，请先更新';
+            ? `你的脚本版本过低，最低支持版本为 v${requiredText}`
+            : '你的脚本版本过低，请更新';
         const detail = latestText && latestText !== requiredText
             ? `当前最新版本：v${latestText}`
             : '';
@@ -1223,7 +1222,7 @@ function GM_xmlhttpRequest(options) {
                 <div id="helper-body">
                     <div id="risk-notice" style="${riskAccepted ? 'display:none' : 'display:block'}; white-space:pre-line; font-size:12px; margin-bottom:8px; padding:8px; border-radius:var(--radius); background:var(--warn-bg); border:1px solid var(--warn-line); color:var(--warn); line-height:1.5;"></div>
                     <button id="risk-accept-btn" class="btn-primary" style="${riskAccepted ? 'display:none' : 'display:block'}; width:100%; margin-bottom:8px; padding:8px;">我已阅读并确认</button>
-                    <div id="login-status" style="font-size:12px; margin-bottom:8px; color:var(--text-secondary);">${token ? '检测登录中...' : '未登录'}</div>
+                    <div id="login-status" style="font-size:12px; margin-bottom:8px; color:var(--text-secondary);">${token ? '检测登录状态...' : '未登录'}</div>
                     <div id="auth-section" style="${token || !riskAccepted ? 'display:none' : 'display:block'}">
                         <button id="login-linuxdo" class="btn-primary" style="width:100%; padding:8px;">登录 Linux.do</button>
                         <button id="update-script-btn" class="btn-primary" style="display:none; margin-top:8px; width:100%; padding:8px;">更新扩展</button>
@@ -1278,7 +1277,7 @@ function GM_xmlhttpRequest(options) {
                                 <button id="toggle-helper" class="btn-primary" style="flex:1; padding:8px;">开启互助</button>
                             </div>
                         </div>
-                        <!-- 4.0.20 P1：申请入口（槽位/限额折叠表单，保持原 DOM id 与事件绑定不变） -->
+                        <!-- 4.0.20 P1：申请入口（槽位折叠表单，保持原 DOM id 与事件绑定不变） -->
                         <div id="apply-section" class="panel-section">
                             <div class="section-label">申请</div>
                             <div id="slot-apply-section" style="font-size:12px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
@@ -1293,23 +1292,9 @@ function GM_xmlhttpRequest(options) {
                                     <button id="slot-apply-cancel" style="flex:1; padding:6px; background:var(--bg-muted); color:var(--text-secondary);">取消</button>
                                 </div>
                             </div>
-                            <div id="limit-apply-section" style="margin-top:6px; font-size:12px; display:flex; flex-wrap:wrap; gap:6px; align-items:center;">
-                                <a id="limit-apply-link" style="color:var(--link); cursor:pointer; text-decoration:underline;">申请提升限额</a>
-                                <span id="limit-apply-pending" style="display:none; color:var(--warn);">限额申请审核中</span>
-                            </div>
-                            <div id="limit-apply-form" style="display:none; margin-top:6px;">
-                                <input id="limit-apply-daily" type="number" min="1" max="999" placeholder="每日被助上限（1~999）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:var(--input-bg); color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px;">
-                                <input id="limit-apply-monthly" type="number" min="1" max="99999" placeholder="每月被助上限（1~99999）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:var(--input-bg); color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px;">
-                                <input id="limit-apply-url" type="text" placeholder="网易云主页链接（必填，http/https）" style="margin-bottom:4px;">
-                                <textarea id="limit-apply-reason" placeholder="理由（必填）" style="width:100%; box-sizing:border-box; border:1px solid var(--line); border-radius:var(--radius); background:var(--input-bg); color:var(--text); font-size:12px; padding:5px 6px; margin-bottom:4px; resize:vertical;"></textarea>
-                                <div style="display:flex; gap:8px;">
-                                    <button id="limit-apply-submit" class="btn-primary" style="flex:1; padding:6px;">提交申请</button>
-                                    <button id="limit-apply-cancel" style="flex:1; padding:6px; background:var(--bg-muted); color:var(--text-secondary);">取消</button>
-                                </div>
-                            </div>
                         </div>
                     </div>
-                    <button id="manual-btn" class="btn-primary" style="display:none; width:100%; margin-top:8px; padding:8px; animation: blink 1s infinite;">点我激活播放</button>
+                    <button id="manual-btn" class="btn-primary" style="display:none; width:100%; margin-top:8px; padding:8px; animation: blink 1s infinite;">点击开始播放</button>
                 </div>
             </div>
         `;
@@ -1441,14 +1426,6 @@ function GM_xmlhttpRequest(options) {
             document.getElementById('slot-apply-form').style.display = 'none';
         };
         document.getElementById('slot-apply-submit').onclick = submitSlotApplication;
-        document.getElementById('limit-apply-link').onclick = () => {
-            if (pendingLimitApplication) return;
-            document.getElementById('limit-apply-form').style.display = 'block';
-        };
-        document.getElementById('limit-apply-cancel').onclick = () => {
-            document.getElementById('limit-apply-form').style.display = 'none';
-        };
-        document.getElementById('limit-apply-submit').onclick = submitLimitApplication;
         document.getElementById('manual-btn').onclick = async () => {
             const btn = document.getElementById('manual-btn');
             btn.innerText = '正在尝试激活播放...';
@@ -1875,12 +1852,6 @@ function GM_xmlhttpRequest(options) {
             const linkEl = document.getElementById('slot-apply-link');
             if (pendingEl) pendingEl.style.display = pendingSlotApplication ? 'block' : 'none';
             if (linkEl) linkEl.style.display = pendingSlotApplication ? 'none' : 'block';
-            // 是否有待审核的限额提升申请：有则隐藏「申请」入口，展示「限额申请审核中」
-            pendingLimitApplication = !!d.pending_limit_application;
-            const limitPendingEl = document.getElementById('limit-apply-pending');
-            const limitLinkEl = document.getElementById('limit-apply-link');
-            if (limitPendingEl) limitPendingEl.style.display = pendingLimitApplication ? 'block' : 'none';
-            if (limitLinkEl) limitLinkEl.style.display = pendingLimitApplication ? 'none' : 'block';
             // 优先从云端歌曲草稿同步（门户保存的原始 ID）
             const songsRes = await callAPI('GET', '/songs');
             if (songsRes && songsRes.status === 'pending') {
@@ -1909,12 +1880,12 @@ function GM_xmlhttpRequest(options) {
             return;
         }
         // 登录态获取失败（网络异常等），且无其他错误提示覆盖时：可点击重试
-        if (loginStatus && !d && loginStatus.innerText === '检测登录中...') {
+        if (loginStatus && !d && loginStatus.innerText === '检测登录状态...') {
             loginStatus.innerText = '登录状态获取失败，点击重试';
             loginStatus.style.cursor = 'pointer';
             loginStatus.style.color = 'var(--bad)';
             loginStatus.onclick = function () {
-                loginStatus.innerText = '检测登录中...';
+                loginStatus.innerText = '检测登录状态...';
                 loginStatus.style.cursor = '';
                 loginStatus.style.color = '';
                 refreshMe();
@@ -1929,16 +1900,31 @@ function GM_xmlhttpRequest(options) {
         currentParticipantCredits = credits;
         // 4.0.20 N1：每日被助上限生效值存模块变量（缺失不动旧值，初始兜底 30）
         if (participant.today_received_limit != null) currentTodayReceivedLimit = Number(participant.today_received_limit);
-        const todayReceived = Number(participant.today_received_help_count || 0);
+        const todayReceived = Number(participant.received_finished_count_24h != null ? participant.received_finished_count_24h : participant.today_received_help_count || 0);
         const todayReceivedLimit = Number(participant.today_received_limit || 0);
         const todayHelped = Number(participant.today_helped_count || 0);
-        const todayHelpedLimit = Number(participant.today_helped_limit ?? 35);
         const monthlyReceived = Number(participant.monthly_received_help_count || 0);
         const monthlyLimit = Number(participant.monthly_received_limit || 0);
+        const helpSecondsLimit = Number(participant.help_seconds_limit != null ? participant.help_seconds_limit : NaN);
+        const helpSecondsUsed = Number(participant.help_seconds_used != null ? participant.help_seconds_used : NaN);
+        const helpSecondsRemain = Number(participant.remaining_help_seconds != null ? participant.remaining_help_seconds : NaN);
+        const monthlyCapReached = !!participant.monthly_cap_reached;
         const lines = [];
-        if (todayReceivedLimit > 0) lines.push(`24 小时内被助: ${todayReceived} / ${todayReceivedLimit}`);
-        lines.push(`24 小时内帮听: ${todayHelped} / ${todayHelpedLimit > 0 ? todayHelpedLimit : '不限'}`);
-        if (monthlyLimit > 0) lines.push(`近 30 天被助: ${monthlyReceived} / ${monthlyLimit}`);
+        if (todayReceivedLimit > 0) lines.push(`今日被助: ${todayReceived} / ${todayReceivedLimit}`);
+        // v5 秒闸：帮听次数已无上限，改按秒展示；help_seconds_* 缺失时降级为「帮听额度（秒）」
+        if (Number.isFinite(helpSecondsLimit) && helpSecondsLimit > 0) {
+            const used = Number.isFinite(helpSecondsUsed)
+                ? helpSecondsUsed
+                : (Number.isFinite(helpSecondsRemain) ? Math.max(0, helpSecondsLimit - helpSecondsRemain) : 0);
+            let helpedText = helpSecondsLimit >= 60
+                ? `今日帮听 ${Math.floor(used / 60)} 分钟 / 上限 ${Math.floor(helpSecondsLimit / 60)} 分钟`
+                : `今日帮听秒 ${used} / ${helpSecondsLimit}`;
+            if (Number.isFinite(helpSecondsRemain)) helpedText += `（剩余 ${helpSecondsRemain} 秒）`;
+            lines.push(helpedText);
+        } else {
+            lines.push(`帮听额度（秒）: ${todayHelped}`);
+        }
+        if (monthlyLimit > 0 || monthlyCapReached) lines.push(`近 30 天（滚动）被助: ${monthlyReceived} / ${monthlyLimit}`);
         lines.push(`可用额度: ${credits}`);
         // 数据区常驻可见，运行时也不被「正在互助」文本覆盖
         if (statsEl) {
@@ -2027,7 +2013,7 @@ function GM_xmlhttpRequest(options) {
         if (!summary || typeof summary !== 'object') return '暂无可互助目标，30s 后重试';
         const reason = String(summary.reason || '');
         if (reason === 'resting') return '已连续播放较久，正在随机休息，稍后自动恢复...';
-        if (reason === 'daily_limit') return '24 小时内帮助次数已达上限，24 小时滚动窗口结束后再来吧。';
+        if (reason === 'daily_limit') return '今日帮助已达上限，24 小时后自动恢复。';
         const participants = Number(summary.participants || 0);
         const notSelf = Number(summary.notSelf || 0);
         const active = Number(summary.active || 0);
@@ -2039,15 +2025,15 @@ function GM_xmlhttpRequest(options) {
         // 输出简短兜底文案，不输出全 0 的误导明细行；其他 reason 行为保持不变。
         if (reason === 'contended' && participants === 0 && notSelf === 0 && active === 0
             && withCredit === 0 && underMonthly === 0 && underActiveJobs === 0 && notInCooldown === 0) {
-            return '目标竞争，稍后重试，30s 后自动继续。';
+            return '任务被抢，稍后再试，30s 后自动继续。';
         }
-        const detail = `入队用户: ${participants}，非本人: ${notSelf}，正常: ${active}，有可用额度: ${withCredit}，未到月上限: ${underMonthly}，未超并发: ${underActiveJobs}，非冷却: ${notInCooldown}`;
+        const detail = `入队用户: ${participants}，非本人: ${notSelf}，正常: ${active}，有可用额度: ${withCredit}，未到近 30 天上限: ${underMonthly}，未超并发: ${underActiveJobs}，非冷却: ${notInCooldown}`;
         const reasonMap = {
             no_participants: '当前没人加入互助队列',
             only_self: '当前队列里只有你自己，不能给自己互助',
             no_active_participants: '队列里没有正常状态的其他用户',
             no_participant_with_credit: '其他入队用户都没有可用额度',
-            all_monthly_limit_reached: '其他入队用户都已达到本月被互助上限',
+            all_monthly_limit_reached: '其他入队用户都已达到近 30 天（滚动）被互助上限',
             all_active_job_limited: '其他入队用户当前派发任务数已满',
             all_in_cooldown: '其他候选都处于同账号冷却期',
             no_eligible_participant: '当前没有满足条件的互助目标',
@@ -2089,63 +2075,6 @@ function GM_xmlhttpRequest(options) {
         const form = document.getElementById('slot-apply-form');
         const pendingEl = document.getElementById('slot-apply-pending');
         const linkEl = document.getElementById('slot-apply-link');
-        if (form) form.style.display = 'none';
-        if (pendingEl) pendingEl.style.display = 'block';
-        if (linkEl) linkEl.style.display = 'none';
-        showHelperInfo(d.message || '已提交，待管理员审核。', 'warn');
-    }
-
-    // 「申请提升限额」：弹简易表单（每日/每月上限 + 网易云主页 + 理由）→
-    // POST /api/limit-applications → 提示「已提交，待管理员审核」/ 已有 pending 时提示
-    async function submitLimitApplication() {
-        if (GM_getValue(RISK_ACCEPTED_KEY, '') !== '1') return;
-        if (upgradeRequired) return;
-        if (pendingLimitApplication) {
-            showHelperInfo('已有待审核的限额申请，请等待管理员处理。', 'warn');
-            return;
-        }
-        const dailyInput = document.getElementById('limit-apply-daily');
-        const monthlyInput = document.getElementById('limit-apply-monthly');
-        const urlInput = document.getElementById('limit-apply-url');
-        const reasonInput = document.getElementById('limit-apply-reason');
-        const daily = Number(dailyInput ? dailyInput.value : 0);
-        const monthly = Number(monthlyInput ? monthlyInput.value : 0);
-        const neteaseUrl = String(urlInput ? urlInput.value || '' : '').trim();
-        const reason = String(reasonInput ? reasonInput.value || '' : '').trim();
-        if (!Number.isInteger(daily) || daily < 1 || daily > 999) {
-            showHelperInfo('请填写每日被助上限（1~999）。', 'warn');
-            return;
-        }
-        if (!Number.isInteger(monthly) || monthly < 1 || monthly > 99999) {
-            showHelperInfo('请填写每月被助上限（1~99999）。', 'warn');
-            return;
-        }
-        if (!/^https?:\/\/\S+$/i.test(neteaseUrl)) {
-            showHelperInfo('请填写合法的网易云主页链接（http/https）。', 'warn');
-            return;
-        }
-        if (!reason) {
-            showHelperInfo('请填写申请理由。', 'warn');
-            return;
-        }
-        const d = await callAPI('POST', '/limit-applications', {
-            requested_daily_limit: daily,
-            requested_monthly_limit: monthly,
-            netease_url: neteaseUrl,
-            reason: reason
-        });
-        if (!d) {
-            showHelperInfo('提交失败，请检查网络后重试。', 'warn');
-            return;
-        }
-        if (d.error) {
-            showHelperInfo(d.message || getPayloadErrorText(d, 'submit_failed'), 'warn');
-            return;
-        }
-        pendingLimitApplication = true;
-        const form = document.getElementById('limit-apply-form');
-        const pendingEl = document.getElementById('limit-apply-pending');
-        const linkEl = document.getElementById('limit-apply-link');
         if (form) form.style.display = 'none';
         if (pendingEl) pendingEl.style.display = 'block';
         if (linkEl) linkEl.style.display = 'none';
@@ -2258,7 +2187,7 @@ function GM_xmlhttpRequest(options) {
             toggleButton.disabled = false;
         }
         if (helperInfo) {
-            helperInfo.innerText = '已停止本机互助播放；已保存的歌曲仍会按剩余额度被其他人互助。';
+            helperInfo.innerText = '已停止本机挂机；已保存歌曲仍在被助队列。';
         }
         setHelperInfoStyle('neutral');
         updateMinButtonState();
@@ -2329,7 +2258,7 @@ function GM_xmlhttpRequest(options) {
         return callAPI('POST', '/play/finish', payload);
     }
 
-    // ===== 多级自愈（v4.0.19）：网络/API 失败自动重试 → 自动刷新页面 → 停止 =====
+    // ===== 多级自愈（v4.0.20）：网络/API 失败自动重试 → 自动刷新页面 → 停止 =====
     // 目标：挂机期间遇到瞬时网络抖动/服务端临时错误/连续播放失败时自动恢复；
     // 刷新有次数上限与最小间隔防抖，多次仍失败则停止并给出明确文案，不无限循环。
     const HEAL = {
@@ -2558,8 +2487,8 @@ function GM_xmlhttpRequest(options) {
                     if (result.participant) updateParticipantInfo(result.participant);
                     infoEl.style.display = 'block';
                     infoEl.innerText = credited
-                        ? `助力成功\n本次获得额度: ${earnedCredits}${credits === null ? '' : `\n当前剩余额度: ${credits}`}`
-                        : `任务已提交过\n本次未重复增加额度${credits === null ? '' : `\n当前剩余额度: ${credits}`}`;
+                        ? `助力成功\n本次获得额度: ${earnedCredits}${credits === null ? '' : `\n当前可用额度: ${credits}`}`
+                        : `任务已提交过\n本次未重复增加额度${credits === null ? '' : `\n当前可用额度: ${credits}`}`;
                     setTimeout(playNext, 2500);
                     return;
                 }
@@ -2715,7 +2644,7 @@ function GM_xmlhttpRequest(options) {
                     const speedWarning = playbackRateInvalid ? '\n检测到倍速播放，请恢复 1x 后继续' : '';
                     const displayDurationMs = expectedDurationMs > 0 ? expectedDurationMs : dur;
                     const displayListenedMs = displayDurationMs > 0 ? Math.min(localListenedMs, displayDurationMs) : localListenedMs;
-                    const currentCreditsLine = currentParticipantCredits === null ? '' : `\n当前剩余额度: ${currentParticipantCredits}`;
+                    const currentCreditsLine = currentParticipantCredits === null ? '' : `\n当前可用额度: ${currentParticipantCredits}`;
                     infoEl.innerText = `正在互助 [单曲]\n歌曲时长: ${formatTime(displayDurationMs)}\n当前进度: ${formatTime(cur)}\n有效播放: ${formatTime(displayListenedMs)} / ${formatTime(requiredListenMs)}\n本次完成可得额度: ${creditCost}${currentCreditsLine}${speedWarning}`;
 
                     const listenFinishToleranceMs = 5000;
