@@ -109,7 +109,7 @@ function GM_xmlhttpRequest(options) {
         })
         .catch(function () { vipTypeCache = 0; return 0; });
     }
-    const SIGN_VERSION = '4.0.20'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
+    const SIGN_VERSION = '4.0.21'; // 服务端下发脚本时会注入该常量（replaceCurrentVersion）
     const LEGACY_VERSION = '4.0.13';
     // HMAC 签名防重放（V4.0.14 引入）：只有能计算签名（crypto.subtle 可用）时才宣告
     // 新版本并携带 X-Timestamp/X-Nonce/X-Signature；不能算就保持旧版本号，服务端按
@@ -2038,6 +2038,7 @@ function GM_xmlhttpRequest(options) {
             all_in_cooldown: '其他候选都处于同账号冷却期',
             no_eligible_participant: '当前没有满足条件的互助目标',
             helper_banned: '网络环境不稳定，暂停互助一个小时',
+            helper_busy: '你已有一个进行中的任务，完成后才会接下一单。',
         };
         return `${reasonMap[reason] || '暂无可互助目标'}，30s 后重试\n${detail}`;
     }
