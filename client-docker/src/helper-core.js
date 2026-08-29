@@ -478,6 +478,10 @@
         return code === 'service_paused' || code === 'service_d1_blocked' || code === 'service_manual_blocked' || code === 'service_window_closed';
     }
 
+    function isAuthRevokeError(code) {
+        return code === 'banned' || code === 'forbidden' || code === 'registration_required' || code === 'invalid_or_expired_token';
+    }
+
     function handleAccessError(code, messageOverride = '') {
         const text = messageOverride || getErrorText(code);
         const isBanned = code === 'banned';
@@ -1089,6 +1093,36 @@
                 }
             }, 3000);
         }
+        attachDockerStatusLogger();
+    }
+
+    function attachDockerStatusLogger() {
+        const el = document.getElementById('helper-info');
+        if (!el || el.dataset.dockerLog === '1') return;
+        el.dataset.dockerLog = '1';
+        let lastLogged = '';
+        let lastProgressAt = 0;
+        const emit = () => {
+            const raw = String(el.innerText || '').trim();
+            if (!raw) return;
+            const line = raw.replace(/\s*\n\s*/g, ' · ');
+            const isProgress = line.indexOf('正在互助') === 0 || line === '正在努力加载...';
+            const now = Date.now();
+            if (isProgress) {
+                if (lastLogged.indexOf('正在互助') === 0 && now - lastProgressAt < 30000) return;
+                lastProgressAt = now;
+            } else if (line === lastLogged) {
+                return;
+            }
+            lastLogged = line;
+            try {
+                if (window.__bridge && typeof window.__bridge.log === 'function') {
+                    window.__bridge.log(line);
+                }
+            } catch (e) { /* 无头桥接未就绪时忽略 */ }
+        };
+        const obs = new MutationObserver(emit);
+        obs.observe(el, { childList: true, characterData: true, subtree: true });
     }
 
     async function fetchConfig() {
@@ -1401,10 +1435,10 @@
                 showUpgradeRequired(payload.minSupportedVersion, payload.latestVersion);
                 return payload;
             }
-            handleAccessError(
-                payload && payload.error ? payload.error : 'forbidden',
-                payload && payload.message ? payload.message : '',
-            );
+            const code = payload && payload.error ? payload.error : 'forbidden';
+            if (isAuthRevokeError(code)) {
+                handleAccessError(code, payload && payload.message ? payload.message : '');
+            }
             return payload;
         }
         if (result.status === 503 && payload && isServicePauseError(payload.error)) {
@@ -1776,6 +1810,7 @@
     }
 
     function stopHelper() {
+        HEAL.reset();
         isHelperRunning = false;
         activeJoinState = null;
         clearInterval(monitorTimer);
@@ -1799,6 +1834,8 @@
 
     async function startHelper(musicIds, preference) {
         isHelperRunning = true;
+        clearInterval(joinTimer);
+        joinTimer = null;
         activeJoinState = { musicIds: musicIds, musics: null, preference: preference };
         document.getElementById('toggle-helper').innerText = '停止互助';
         document.getElementById('toggle-helper').style.background = 'var(--ok)';
@@ -1811,24 +1848,29 @@
 
         const joined = await joinSelf(activeJoinState);
         if (!joined) {
-            stopHelper();
-            document.getElementById('helper-info').innerText = '服务器连接失败，未能加入互助队列';
+            document.getElementById('helper-info').innerText = '服务器连接失败，未能加入互助队列，30 秒后自动重试...';
             setHelperInfoStyle('warn');
-            return;
+            return scheduleHeal('join_fail');
         }
         if (!joined.ok) {
-            stopHelper();
-            if (isApiErrorPayload(joined)) {
-                if (!isServicePauseError(joined.error)) {
-                    document.getElementById('helper-info').innerText = getPayloadErrorText(joined, 'join_failed');
-                }
-            } else {
-                document.getElementById('helper-info').innerText = '服务器连接失败，未能加入互助队列';
+            if (isApiErrorPayload(joined) && isServicePauseError(joined.error)) {
+                return;
             }
+            if (joined.error === 'songs_pending_review') {
+                stopHelper();
+                document.getElementById('helper-info').innerText = getPayloadErrorText(joined, 'join_failed');
+                setHelperInfoStyle('warn');
+                return;
+            }
+            const msg = isApiErrorPayload(joined)
+                ? getPayloadErrorText(joined, 'join_failed')
+                : '服务器连接失败，未能加入互助队列';
+            document.getElementById('helper-info').innerText = msg + '，30 秒后自动重试...';
             setHelperInfoStyle('warn');
-            return;
+            return scheduleHeal('join_fail');
         }
 
+        HEAL.clearFail();
         joinTimer = setInterval(() => {
             if (activeJoinState) joinSelf(activeJoinState);
         }, JOIN_REFRESH_INTERVAL_MS);
@@ -1862,6 +1904,75 @@
         return callAPI('POST', '/play/finish', payload);
     }
 
+    // ===== 多级自愈：网络/API 失败自动重试 → 刷新页面 → 停止 =====
+    const HEAL = {
+        NET_RETRY_DELAY_MS: 30000,
+        MAX_NET_FAIL_BEFORE_REFRESH: 3,
+        MAX_CONSECUTIVE_ABANDON: 5,
+        REFRESH_MIN_INTERVAL_MS: 120000,
+        MAX_REFRESH_PER_SEQUENCE: 2,
+        WINDOW_POLL_MS: 60000,
+        netFail: 0,
+        abandonStreak: 0,
+        refreshCount: 0,
+        lastRefreshAt: 0,
+        reset() {
+            HEAL.netFail = 0;
+            HEAL.abandonStreak = 0;
+            HEAL.refreshCount = 0;
+            HEAL.lastRefreshAt = 0;
+        },
+        clearFail() {
+            if (HEAL.netFail || HEAL.abandonStreak || HEAL.refreshCount) {
+                HEAL.netFail = 0;
+                HEAL.abandonStreak = 0;
+                HEAL.refreshCount = 0;
+                HEAL.lastRefreshAt = 0;
+            }
+        }
+    };
+
+    function scheduleHeal(kind) {
+        if (!isHelperRunning) return;
+        if (kind === 'window_wait') {
+            setTimeout(playNext, HEAL.WINDOW_POLL_MS);
+            return;
+        }
+        HEAL.netFail += 1;
+        if (HEAL.netFail >= HEAL.MAX_NET_FAIL_BEFORE_REFRESH) {
+            performPageReload(kind === 'join_fail' ? '加入队列持续失败' : '网络/服务持续异常');
+            return;
+        }
+        if (kind === 'join_fail') {
+            setTimeout(() => {
+                if (!isHelperRunning || !activeJoinState) return;
+                startHelper(activeJoinState.musicIds, activeJoinState.preference);
+            }, HEAL.NET_RETRY_DELAY_MS);
+            return;
+        }
+        setTimeout(playNext, HEAL.NET_RETRY_DELAY_MS);
+    }
+
+    function performPageReload(reason) {
+        const now = Date.now();
+        if (now - HEAL.lastRefreshAt < HEAL.REFRESH_MIN_INTERVAL_MS) {
+            setTimeout(playNext, HEAL.NET_RETRY_DELAY_MS);
+            return;
+        }
+        if (HEAL.refreshCount >= HEAL.MAX_REFRESH_PER_SEQUENCE) {
+            try { stopHelper(); } catch (e) {}
+            const el = document.getElementById('helper-info');
+            if (el) el.innerText = '多次尝试后仍无法恢复，已自动停止；请检查网络/账号后手动开启';
+            return;
+        }
+        HEAL.refreshCount += 1;
+        HEAL.lastRefreshAt = now;
+        try { GM_setValue('autoStart', '1'); } catch (e) {}
+        const el = document.getElementById('helper-info');
+        if (el) el.innerText = `${reason}，正在自动刷新页面重试...（${HEAL.refreshCount}/${HEAL.MAX_REFRESH_PER_SEQUENCE}）`;
+        setTimeout(() => { try { location.reload(); } catch (e) {} }, 500);
+    }
+
     async function playNext() {
         if (!isHelperRunning) return;
         clearInterval(monitorTimer);
@@ -1874,16 +1985,22 @@
         }
         if(!data) {
             await idleCleanupPlaybackBestEffort();
-            infoEl.innerText = '服务器连接失败';
-            return;
+            infoEl.innerText = '服务器连接失败，30 秒后自动重试...';
+            return scheduleHeal('net_fail');
         }
         if (isApiErrorPayload(data)) {
             await idleCleanupPlaybackBestEffort();
-            if (!isServicePauseError(data.error)) {
-                infoEl.innerText = getPayloadErrorText(data, 'next_failed');
+            if (isServicePauseError(data.error)) {
+                return;
             }
-            return;
+            if (data.error === 'outside_active_window') {
+                infoEl.innerText = '当前不在活跃窗口内，1 分钟后自动重试...';
+                return scheduleHeal('window_wait');
+            }
+            infoEl.innerText = getPayloadErrorText(data, 'next_failed') + '，30 秒后自动重试...';
+            return scheduleHeal('api_err');
         }
+        HEAL.clearFail();
         if (data.participant) updateParticipantInfo(data.participant);
 
         if (data.musicId) {
@@ -1915,6 +2032,12 @@
                     result = null;
                 }
                 if (result && result.ok) {
+                    HEAL.abandonStreak += 1;
+                    if (HEAL.abandonStreak >= HEAL.MAX_CONSECUTIVE_ABANDON) {
+                        infoEl.innerText = '连续多次播放失败，正在自动刷新页面重试...';
+                        performPageReload('连续多次播放失败');
+                        return;
+                    }
                     infoEl.innerText = `已主动放弃当前任务（${reason}），继续下一单...`;
                     playNext();
                 } else {

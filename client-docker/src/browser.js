@@ -34,6 +34,53 @@ exports.KEYS = KEYS;
 
 // 活跃窗口拦截的响应体（返回 429，与 helper-core 对 429 的处理对齐）。
 const OUTSIDE_WINDOW_BODY = JSON.stringify({ error: 'outside_active_window' });
+const SKIP_OK_API_RE = /\/(?:me|ledger|auth-config|auth\/refresh|play\/heartbeat)(?:\?|$)/;
+
+function platformApiPath(url, apiBase) {
+  const base = String(apiBase || '');
+  const u = String(url || '');
+  if (!base || u.indexOf(base) !== 0) return '';
+  return u.slice(base.length) || '/';
+}
+
+function summarizePlatformBody(apiPath, text) {
+  let extra = '';
+  try {
+    const j = JSON.parse(text);
+    if (!j || typeof j !== 'object') return extra;
+    const pathOnly = String(apiPath).split('?')[0];
+    if (j.error) {
+      extra = j.message ? (j.error + ': ' + j.message) : String(j.error);
+    } else if (pathOnly === '/next') {
+      if (j.musicId) {
+        const owner = (j.owner && (j.owner.displayName || j.owner.username))
+          ? String(j.owner.displayName || j.owner.username)
+          : '互助用户';
+        extra = '目标 ' + owner + ' · ' + j.musicId;
+        if (j.creditCost != null) extra += ' · 额度 ' + j.creditCost;
+      } else if (j.noTargetReason) {
+        const r = j.noTargetReason;
+        extra = typeof r === 'object' ? ('暂无目标 (' + (r.reason || 'unknown') + ')') : '暂无目标';
+      }
+    } else if (pathOnly === '/play/finish') {
+      if (j.ok) {
+        extra = j.credited !== false ? '入账成功' : '重复提交未入账';
+        const credits = j.participant && (j.participant.available_credits != null
+          ? j.participant.available_credits
+          : j.participant.credits);
+        if (credits != null) extra += ' · 积分 ' + credits;
+      } else {
+        extra = '提交失败';
+      }
+    } else if (pathOnly === '/play/abandon') {
+      extra = j.ok ? '已放弃本单' : '放弃失败';
+    } else if (pathOnly === '/join') {
+      extra = j.ok ? '已入队' : '入队失败';
+    }
+  } catch (e) { /* 非 JSON 忽略 */ }
+  if (extra.length > 180) extra = extra.slice(0, 180) + '…';
+  return extra;
+}
 
 /**
  * 解析用户粘贴的网易云 Cookie 字符串（"MUSIC_U=...; __csrf=..."）为
@@ -92,6 +139,8 @@ class Browser {
     this._helperCorePath = path.join(__dirname, 'helper-core.js');
     this._helperCoreSource = null; // 惰性读取并缓存
     this._reloadSeq = 0;           // 重载代次，用于丢弃过期快照写回
+    this._lastPageLog = '';
+    this._lastPageLogAt = 0;
   }
 
   _log(level, msg) {
@@ -290,6 +339,8 @@ class Browser {
     // 不接听会阻塞页面——统一自动 dismiss，避免互助主循环卡死。
     this.page.on('dialog', (dialog) => { dialog.dismiss().catch(() => {}); });
 
+    await this._blockIdleAssets();
+
     // 1) exposeFunction 暴露 __bridge（Node 侧函数 → 页内 window.__bridge.*）。
     await this._exposeBridge();
 
@@ -298,6 +349,30 @@ class Browser {
 
     // 3) 注入 Cookie 并 navigate
     await this.reload();
+  }
+
+  /**
+   * 拦图片/字体/常见统计脚本。不拦 media/xhr/script：播歌和 player 依赖它们。
+   */
+  async _blockIdleAssets() {
+    if (!this.context) return;
+    const skipHost = /(^|\.)163\.(com|net)$|(^|\.)music\.126\.net$/i;
+    const blockHost = /(google-analytics|googletagmanager|doubleclick|umeng|cnzz|scorecardresearch|facebook\.net|hotjar)/i;
+    await this.context.route('**/*', (route) => {
+      const req = route.request();
+      const type = req.resourceType();
+      const url = req.url();
+      if (type === 'image' || type === 'font' || type === 'ping') {
+        return route.abort();
+      }
+      try {
+        const host = new URL(url).hostname;
+        if (!skipHost.test(host) && blockHost.test(host)) {
+          return route.abort();
+        }
+      } catch (e) { /* ignore */ }
+      return route.continue();
+    });
   }
 
   async _exposeBridge() {
@@ -310,7 +385,13 @@ class Browser {
       self._handleStoreWrite(key, value);
     });
     await this.context.exposeFunction('__gmBridgeLog', (msg) => {
-      self._log('info', '[page] ' + String(msg));
+      const line = String(msg || '').trim();
+      if (!line) return;
+      const now = Date.now();
+      if (line === self._lastPageLog && now - self._lastPageLogAt < 2000) return;
+      self._lastPageLog = line;
+      self._lastPageLogAt = now;
+      self._log('info', '播放 ' + line);
     });
     await this.context.exposeFunction('__gmBridgeStatus', (obj) => {
       try {
@@ -357,10 +438,13 @@ class Browser {
     if (typeof this.requestHook === 'function') {
       const intercepted = this.requestHook({ method, url, headers, data, timeout });
       if (intercepted) {
+        const status = intercepted.status != null ? intercepted.status : 429;
+        const responseText = intercepted.responseText != null ? String(intercepted.responseText) : OUTSIDE_WINDOW_BODY;
+        this._logPlatformApi(method, url, status, responseText, '拦截');
         return {
-          status: intercepted.status != null ? intercepted.status : 429,
+          status,
           statusText: '',
-          responseText: intercepted.responseText != null ? String(intercepted.responseText) : OUTSIDE_WINDOW_BODY,
+          responseText,
           responseHeaders: {},
           finalUrl: url,
         };
@@ -392,6 +476,7 @@ class Browser {
       if (res.headers && typeof res.headers.forEach === 'function') {
         res.headers.forEach((v, k) => { respHeaders[k] = v; });
       }
+      this._logPlatformApi(method, url, res.status, text, '');
       return {
         status: res.status,
         statusText: res.statusText || '',
@@ -401,12 +486,27 @@ class Browser {
       };
     } catch (e) {
       if (e && e.name === 'AbortError') {
+        this._logPlatformApi(method, url, 0, '', '超时');
         return { reason: 'timeout' };
       }
+      this._logPlatformApi(method, url, 0, '', '网络错误');
       return { reason: 'error' };
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  _logPlatformApi(method, url, status, bodyText, note) {
+    const apiPath = platformApiPath(url, this.config.apiBase);
+    if (!apiPath) return;
+    const failed = status < 200 || status >= 400;
+    if (!failed && SKIP_OK_API_RE.test(apiPath)) return;
+    const extra = summarizePlatformBody(apiPath, bodyText || '');
+    const bits = ['接口', method, apiPath];
+    if (status > 0) bits.push(String(status));
+    if (note) bits.push(note);
+    if (extra) bits.push('· ' + extra);
+    this._log(failed ? 'warn' : 'info', bits.join(' '));
   }
 
   /** 注入 helper-core.js（读取文件内容 evaluate）。 */
@@ -420,7 +520,7 @@ class Browser {
       script.textContent = code;
       (document.head || document.documentElement).appendChild(script);
     }, src);
-    this._log('info', 'helper-core 已注入');
+    this._log('info', '页内互助脚本已注入');
     return true;
   }
 

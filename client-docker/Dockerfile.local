@@ -1,0 +1,13 @@
+# Overlay local client-docker source onto the already-pulled official image.
+# Use this when node:20-slim / Playwright cannot be pulled in reasonable time.
+# Full from-scratch build remains Dockerfile.
+
+FROM ghcr.io/y08lin4/163music-help/docker-client:latest
+
+USER root
+WORKDIR /app
+COPY client-docker/. .
+RUN chown -R app:app /app
+
+USER app
+CMD ["node", "src/main.js"]

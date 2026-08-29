@@ -72,7 +72,7 @@
     return m + ':' + String(r).padStart(2, '0');
   }
 
-  // 日志行格式：[ISO时间] [level] message（由 main.js appendLog 生成）
+  // 日志行格式：[本地时间] [level] message（由 main.js appendLog 生成，默认 Asia/Shanghai）
   function parseLogLine(line) {
     const s = String(line == null ? '' : line);
     const m = /^\[([^\]]+)\]\s*\[([^\]]+)\]\s*(.*)$/.exec(s);

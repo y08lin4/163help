@@ -46,6 +46,7 @@ const KEYS = {
   windowEnd: 'activeWindowEnd',
   control: 'controlRequest',        // 'start' | 'stop'；orchestrator 消费后清空
   cookiesDirty: 'cookiesDirty',     // true = cookie 变更，orchestrator 需重载页面
+  pageReloadDirty: 'pageReloadDirty', // true = 凭证等变更，orchestrator 需重载页面
   lockedAccount: 'lockedAccount',   // { userId, displayName }
 };
 
@@ -266,6 +267,7 @@ async function handleConfig(body) {
         updates[KEYS.credential] = credential;
         updates.musicHelperAccessExpiresAt = '';
         updates.musicHelperRefreshExpiresAt = '';
+        updates[KEYS.pageReloadDirty] = true;
       } else {
         // ticket → 走 /api/auth/claim 换 session token（一次性票据，2 分钟内有效）
         const { ApiClient } = require('./api-client');
@@ -275,12 +277,14 @@ async function handleConfig(body) {
           return outputOfError('登录票据无效或已过期（ticket 仅 2 分钟内有效）');
         }
         updates[KEYS.credential] = api.credential();
+        updates[KEYS.pageReloadDirty] = true;
         // claimTicket 内部已写入过期字段（setSessionExpiry）
       }
     } else {
       await store.delete(KEYS.credential);
       await store.delete('musicHelperAccessExpiresAt');
       await store.delete('musicHelperRefreshExpiresAt');
+      updates[KEYS.pageReloadDirty] = true;
     }
   }
 
