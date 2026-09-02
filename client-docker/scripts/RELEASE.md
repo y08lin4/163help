@@ -57,7 +57,7 @@ docker run -d \
     --memory 1g \
     -e UI_PASSWORD='你的密码' \
     -e TZ=Asia/Shanghai \
-    -p 3000:3000 \
+    -p 113000:3000 \
     -v /opt/163music-docker/data:/data \
     ghcr.io/y08lin4/163music-help/docker-client:latest
 ```
@@ -93,7 +93,7 @@ sudo ./vps-setup.sh
 | --- | --- |
 | 镜像 | `ghcr.io/y08lin4/163music-help/docker-client:latest` |
 | 环境变量 | `UI_PASSWORD`（必填）、`TZ=Asia/Shanghai` |
-| 端口 | `-p 3000:3000` |
+| 端口 | `-p 113000:3000` |
 | 数据卷 | `-v /opt/163music-docker/data:/data` |
 | 自启 | `--restart unless-stopped` |
 | 内存限制 | `--memory 1g` |
