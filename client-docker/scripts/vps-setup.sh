@@ -55,12 +55,12 @@ confirm() { # confirm "问题" [默认 y|N]
     [ "$ans" = "y" ] || [ "$ans" = "Y" ]
   fi
 }
-ask() { # ask "提示" "默认值" -> stdout
+ask() { # ask "提示" "默认值" -> 全局 ANS
   local q="$1" def="$2" ans
   printf "%s %s: " "$q" "$([ -n "$def" ] && echo "(${def})")"
-  read -r ans
+  read -r ans >/dev/tty
   [ -z "$ans" ] && ans="$def"
-  echo "$ans"
+  ANS="$ans"
 }
 ask_secret() { # 隐藏输入 + 二次确认
   local p1 p2
@@ -178,17 +178,18 @@ cmd_install() {
   fi
   echo; log i "全新安装向导（163music docker-client ${VERSION}）"
   echo "──────────────────────────────────────────────"
-  IMAGE_SOURCE=$(ask "镜像通道（auto|ghcr|cdn）" "${IMAGE_SOURCE:-auto}")
+  ask "镜像通道（auto|ghcr|cdn）" "${IMAGE_SOURCE:-auto}"; IMAGE_SOURCE=$ANS
   if [ -z "${UI_PASSWORD:-}" ]; then
-    case "$(ask "设置管理密码方式 [1]手动输入 [2]自动生成" "1")" in
+    ask "设置管理密码方式 [1]手动输入 [2]自动生成" "1"
+    case "$ANS" in
       2) UI_PASSWORD=$(random_pw); ok "已生成随机密码（请保存）: ${C_OK}${UI_PASSWORD}${C_OFF}" ;;
       *) UI_PASSWORD=$(ask_secret "请输入 UI_PASSWORD（管理端登录密码）");;
     esac
   else
     ok "使用环境变量提供的 UI_PASSWORD"
   fi
-  HOST_PORT=$(ask "宿主端口（管理端访问）" "${HOST_PORT:-13000}")
-  DATA_DIR=$(ask "数据卷目录（持久化）" "${DATA_DIR:-./data}")
+  ask "宿主端口（管理端访问）" "${HOST_PORT:-13000}"; HOST_PORT=$ANS
+  ask "数据卷目录（持久化）" "${DATA_DIR:-./data}"; DATA_DIR=$ANS
   mkdir -p "$DATA_DIR"
   echo; step 1 3 "拉取镜像"
   pull_image
@@ -296,11 +297,11 @@ cmd_config() {
   echo; log i "修改配置（修改后重建容器生效）"
   echo "──────────────────────────────────────────────"
   local np vol img_tag pw_mode tz
-  np=$(ask "宿主端口" "${HOST_PORT:-13000}")
-  vol=$(ask "数据卷目录" "${DATA_DIR:-$(docker inspect -f '{{range .Mounts}}{{.Source}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo ./data)}")
-  img_tag=$(ask "镜像 tag（latest 或 docker-vX）" "${IMAGE_TAG:-latest}")
-  tz=$(ask "时区" "${TZ:-Asia/Shanghai}")
-  pw_mode=$(ask "密码处理 [1]沿用当前 [2]重新输入 [3]自动生成" "1")
+  ask "宿主端口" "${HOST_PORT:-13000}"; np=$ANS
+  ask "数据卷目录" "${DATA_DIR:-$(docker inspect -f '{{range .Mounts}}{{.Source}}{{end}}' "$CONTAINER_NAME" 2>/dev/null || echo ./data)}"; vol=$ANS
+  ask "镜像 tag（latest 或 docker-vX）" "${IMAGE_TAG:-latest}"; img_tag=$ANS
+  ask "时区" "${TZ:-Asia/Shanghai}"; tz=$ANS
+  ask "密码处理 [1]沿用当前 [2]重新输入 [3]自动生成" "1"; pw_mode=$ANS
   case "$pw_mode" in
     2) UI_PASSWORD=$(ask_secret "新密码") ;;
     3) UI_PASSWORD=$(random_pw); ok "新密码（保存好）: ${C_OK}${UI_PASSWORD}${C_OFF}" ;;
@@ -316,7 +317,7 @@ cmd_reset_password() {
   require_root; require_docker
   container_exists || die "未安装"
   local np
-  np=$(ask "密码方式 [1]手动 [2]自动生成" "1")
+  ask "密码方式 [1]手动 [2]自动生成" "1"; np=$ANS
   case "$np" in
     2) np=$(random_pw); ok "新密码（保存好）: ${C_OK}${np}${C_OFF}" ;;
     *) np=$(ask_secret "新密码") ;;
@@ -348,7 +349,8 @@ cmd_restore() {
   container_exists || die "未安装"
   local f dir
   ls -lt /tmp/163music-docker-client-data-*.tar.gz 2>/dev/null || die "没有备份文件（backup 先备份）"
-  f=$(ask "输入要恢复的备份文件完整路径" "$(ls -t /tmp/163music-docker-client-data-*.tar.gz 2>/dev/null | head -1)")
+  ask "输入要恢复的备份文件完整路径" "$(ls -t /tmp/163music-docker-client-data-*.tar.gz 2>/dev/null | head -1)"
+  f=$ANS
   confirm "恢复会覆盖当前数据卷，确认？" N || return 0
   dir=$(docker inspect -f '{{range .Mounts}}{{.Source}}{{end}}' "$CONTAINER_NAME")
   docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -421,11 +423,11 @@ EOF
       1) cmd_install;;
       2) cmd_upgrade;;
       3) cmd_status;;
-      4) op=$(ask "操作 [start|stop|restart]" "restart"); cmd_lifecycle "$op";;
+      4) ask "操作 [start|stop|restart]" "restart"; op=$ANS; cmd_lifecycle "$op";;
       5) cmd_logs -f --tail 80;;
       6) cmd_config;;
       7) cmd_rollback;;
-      8) op=$(ask "操作 [backup|restore]" "backup"); [ "$op" = "restore" ] && cmd_restore || cmd_backup;;
+      8) ask "操作 [backup|restore]" "backup"; op=$ANS; [ "$op" = "restore" ] && cmd_restore || cmd_backup;;
       9) cmd_diagnose;;
       10) cmd_reset_password;;
       0) cmd_uninstall;;
