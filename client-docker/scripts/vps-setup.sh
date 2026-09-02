@@ -12,7 +12,7 @@
 #
 # 镜像来源（IMAGE_SOURCE 环境变量控制，默认 auto）：
 #   通道 1 GitHub GHCR：
-#     docker pull ghcr.io/y08lin4/163music-help/docker-client:latest
+#     docker pull ghcr.io/y08lin4/163help-client/docker-client:latest
 #     镜像已公开，匿名即可拉取，无需 PAT（历史私有期凭据仍可通过 GHCR_PAT 传入）。
 #   通道 2 Cloudflare CDN（tar）：
 #     curl 下载 tar 包并 docker load，无需登录任何 registry。
@@ -113,7 +113,7 @@ ensure_data_dir() {
 # =============================================================================
 # 3) 登录 GHCR（可选；镜像已公开，匿名即可拉取）
 # -----------------------------------------------------------------------------
-# 镜像 ghcr.io/y08lin4/163music-help/docker-client 已公开，无需 PAT 即可 pull。
+# 镜像 ghcr.io/y08lin4/163help-client/docker-client 已公开，无需 PAT 即可 pull。
 # 本函数仅在设置了 GHCR_PAT 时做一次显式登录（兼容历史私有期凭据），
 # 未设置则直接跳过（匿名拉取）。IMAGE_SOURCE=cdn 时同样跳过。
 # =============================================================================
@@ -149,7 +149,7 @@ require_ui_password() {
 # 5) 获取镜像（双通道）+ 运行容器
 # -----------------------------------------------------------------------------
 # 运行参数与客户端组件约定对齐：
-#   - 镜像    ghcr.io/y08lin4/163music-help/docker-client:latest（两通道产物同名）
+#   - 镜像    ghcr.io/y08lin4/163help-client/docker-client:latest（两通道产物同名）
 #   - 环境    -e UI_PASSWORD（必填）、-e TZ=Asia/Shanghai
 #   - 端口    -p 13000:3000
 #   - 数据卷  -v /opt/163music-docker/data:/data
@@ -269,7 +269,7 @@ print_upgrade_hints() {
 ============================================
  部署完成。后续升级到新版本，执行：
 ============================================
-  docker pull ghcr.io/y08lin4/163music-help/docker-client:latest
+  docker pull ghcr.io/y08lin4/163help-client/docker-client:latest
   docker rm -f 163music-docker-client
   docker run -d \
       --name 163music-docker-client \
@@ -279,7 +279,7 @@ print_upgrade_hints() {
       -e TZ=Asia/Shanghai \
       -p 13000:3000 \
       -v /opt/163music-docker/data:/data \
-      ghcr.io/y08lin4/163music-help/docker-client:latest
+      ghcr.io/y08lin4/163help-client/docker-client:latest
 
   # 也可以用 CDN 通道一键升级（免 PAT，脚本会自动重建容器）：
   #   IMAGE_SOURCE=cdn ./vps-setup.sh
