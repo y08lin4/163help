@@ -45,7 +45,7 @@
 ```bash
 curl -fsSL https://raw.githubusercontent.com/y08lin4/163help/main/client-docker/scripts/vps-setup.sh -o vps-setup.sh
 chmod +x vps-setup.sh
-UI_PASSWORD='你的强密码' ./vps-setup.sh
+运行 ./vps-setup.sh（交互式输入 UI_PASSWORD，不显示）
 ```
 
 **双通道手动安装（任选其一）**
