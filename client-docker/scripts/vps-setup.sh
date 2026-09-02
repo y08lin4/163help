@@ -91,6 +91,26 @@ EOF
 require_root() { [ "$(id -u)" -eq 0 ] || die "请以 root 运行（sudo ./vps-setup.sh）"; }
 require_docker() { command -v docker >/dev/null 2>&1 || die "未安装 docker：请先安装（apt install docker.io）"; }
 
+# ---------- 端口冲突自动顺延 ----------
+resolve_port() { # resolve_port 13000 → 输出可用端口（被占自动 +1）
+  local p="${1:-13000}" tries=0
+  while [ "$tries" -lt 20 ]; do
+    if ! ss -tln 2>/dev/null | grep -q ":${p} " && ! docker ps -a --format '{{.Ports}}' 2>/dev/null | grep -q ":${p}->"; then
+      echo "$p"; return 0
+    fi
+    p=$((p+1)); tries=$((tries+1))
+  done
+  die "未找到空闲端口（13000 起 20 个都被占用）"
+}
+ensure_free_port() { # 交互提示：冲突时自动换端口
+  local want="${HOST_PORT:-13000}" got
+  got=$(resolve_port "$want")
+  if [ "$got" != "$want" ]; then
+    warn "端口 ${want} 已被占用，自动使用 ${got}"
+  fi
+  HOST_PORT="$got"
+}
+
 # ---------- 镜像操作 ----------
 ghcr_digest_of() { # 远程 latest 的 digest
   local tok digest
@@ -196,6 +216,7 @@ cmd_install() {
     ok "使用环境变量提供的 UI_PASSWORD"
   fi
   ask "宿主端口（管理端访问）" "${HOST_PORT:-13000}"; HOST_PORT=$ANS
+  ensure_free_port
   ask "数据卷目录（持久化）" "${DATA_DIR:-./data}"; DATA_DIR=$ANS
   mkdir -p "$DATA_DIR"
   echo; step 1 3 "拉取镜像"
@@ -313,6 +334,8 @@ cmd_config() {
     2) UI_PASSWORD=$(ask_secret "新密码") ;;
     3) UI_PASSWORD=$(random_pw); ok "新密码（保存好）: ${C_OK}${UI_PASSWORD}${C_OFF}" ;;
   esac
+  HOST_PORT=$np; ensure_free_port; np=$HOST_PORT
+  DATA_DIR=$vol; IMAGE_TAG=$img_tag; TZ=$tz; IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
   HOST_PORT=$np; DATA_DIR=$vol; IMAGE_TAG=$img_tag; TZ=$tz; IMAGE="${IMAGE_REPO}:${IMAGE_TAG}"
   mkdir -p "$DATA_DIR"
   step 1 3 "拉取镜像（如 tag 变化）"; pull_image
