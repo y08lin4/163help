@@ -37,13 +37,13 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 # 镜像获取通道：auto（默认，先 GHCR 后 CDN）| ghcr | cdn
 IMAGE_SOURCE="${IMAGE_SOURCE:-auto}"
-IMAGE="ghcr.io/y08lin4/163music-help/docker-client:latest"
+IMAGE="ghcr.io/y08lin4/163help-client/docker-client:latest"
 CDN_TAR_URL="https://163music.linyu.qzz.io/docker/163music-docker-client-latest.tar.gz"
 CDN_SHA_URL="${CDN_TAR_URL}.sha256"
 DATA_DIR="${DATA_DIR:-/opt/163music-docker/data}"
 CONTAINER_NAME="163music-docker-client"
 GHCR_NAMESPACE="ghcr.io/y08lin4"
-# 端口映射：宿主机 3000 → 容器 3000（与客户端组件约定一致）
+# 端口映射：宿主机 13000 → 容器 3000（高位端口避免与常用服务冲突；可用 HOST_PORT=xxx 覆盖）
 HOST_PORT="${HOST_PORT:-13000}"
 CONTAINER_PORT=3000
 TZ="${TZ:-Asia/Shanghai}"
@@ -151,7 +151,7 @@ require_ui_password() {
 # 运行参数与客户端组件约定对齐：
 #   - 镜像    ghcr.io/y08lin4/163music-help/docker-client:latest（两通道产物同名）
 #   - 环境    -e UI_PASSWORD（必填）、-e TZ=Asia/Shanghai
-#   - 端口    -p 113000:3000
+#   - 端口    -p 13000:3000
 #   - 数据卷  -v /opt/163music-docker/data:/data
 #   - 自启    --restart unless-stopped
 #   - 内存    --memory 1g
@@ -277,7 +277,7 @@ print_upgrade_hints() {
       --memory 1g \
       -e UI_PASSWORD='你的密码' \
       -e TZ=Asia/Shanghai \
-      -p 113000:3000 \
+      -p 13000:3000 \
       -v /opt/163music-docker/data:/data \
       ghcr.io/y08lin4/163music-help/docker-client:latest
 
