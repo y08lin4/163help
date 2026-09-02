@@ -129,7 +129,14 @@ pull_image() {
       curl -fSL -o /tmp/mh-docker-client.tar.gz.sha256 "${CDN_SHA_URL}" 2>/dev/null && \
         (cd /tmp && sha256sum -c mh-docker-client.tar.gz.sha256 >/dev/null 2>&1 || warn "sha256 校验失败，请检查网络后重试")
       docker load -i /tmp/mh-docker-client.tar.gz
-      rm -f /tmp/mh-docker-client.tar.gz /tmp/mh-docker-client.tar.gz.sha256 ;;
+      rm -f /tmp/mh-docker-client.tar.gz /tmp/mh-docker-client.tar.gz.sha256
+      # CDN tar 内镜像 tag 为 docker-vX：补 latest 标签（脚本默认用 :latest 启动）
+      local latest_local
+      latest_local=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep '^ghcr.io/y08lin4/163help-client/docker-client:docker-v' | sort -V | tail -1 || true)
+      if [ -n "$latest_local" ]; then
+        docker tag "$latest_local" "ghcr.io/y08lin4/163help-client/docker-client:latest" && ok "已补 latest 标签（$latest_local）"
+      fi
+      ;;
     auto)
       if docker pull "${IMAGE}" 2>/dev/null; then
         ok "GHCR 拉取成功"
