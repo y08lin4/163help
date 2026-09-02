@@ -168,13 +168,13 @@ pull_image() {
   esac
 }
 
-health_check() { # 容器 Up + 管理端探活（重试 5 次）
+health_check() { # 以容器日志出现「管理端 http」为就绪信号（浏览器冷启动 30-50s，最多等 90s）
   local tries=0
-  while [ "$tries" -lt 5 ]; do
-    if container_running && curl -fsS -o /dev/null "http://127.0.0.1:${HOST_PORT:-13000}/" 2>/dev/null; then
+  while [ "$tries" -lt 30 ]; do
+    if container_running && docker logs "$CONTAINER_NAME" 2>&1 | grep -q "管理端 http"; then
       return 0
     fi
-    tries=$((tries+1)); sleep 2
+    tries=$((tries+1)); sleep 3
   done
   return 1
 }
