@@ -238,9 +238,48 @@ acquire_image() {
     esac
 }
 
+# —— 交互式更新检查：本地镜像 digest vs GHCR latest digest ——
+check_for_update() {
+    local local_remote remote_digest token http_code
+    if ! docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
+        return 0   # 全新部署，无需检查
+    fi
+    # 取当前运行容器使用的镜像的 RepoDigest（ghcr digest）
+    local_remote=$(docker inspect -f '{{index .RepoDigests 0}}' "$(docker inspect -f '{{.Image}}' "${CONTAINER_NAME}")" 2>/dev/null | cut -d'@' -f2)
+    token=$(curl -s "https://ghcr.io/token?scope=repository:y08lin4/163help-client/docker-client:pull" | sed -E 's/.*"token":"([^"]+)".*/\1/')
+    remote_digest=$(curl -sI -H "Accept: application/vnd.oci.image.index.v1+json" -H "Authorization: Bearer ${token}" \
+        "https://ghcr.io/v2/y08lin4/163help-client/docker-client/manifests/latest" |
+        tr -d '\r' | grep -i '^docker-content-digest:' | awk '{print $2}')
+    if [ -z "${remote_digest}" ]; then
+        warn "无法获取远程镜像信息，继续（不阻断）"
+        return 0
+    fi
+    if [ -n "${local_remote}" ] && [ "${local_remote}" = "${remote_digest}" ]; then
+        log "✅ 当前容器已是最新版本（digest ${local_remote:0:16}…），无需更新。"
+        exit 0
+    fi
+    echo
+    echo "──────────────────────────────────────────────"
+    echo "  检测到新版本镜像："
+    echo "    local  ﹒${local_remote:0:16}…"
+    echo "    remote ﹒${remote_digest:0:16}…  (latest = 5.0.0)"
+    echo "──────────────────────────────────────────────"
+    printf "  是否立即更新？[y/N] "
+    read -r confirm
+    if [ "${confirm}" != "y" ] && [ "${confirm}" != "Y" ]; then
+        log "已取消更新（保持当前容器运行）。"
+        exit 0
+    fi
+    # 更新 = 继续执行下方的 pull / 重建流程（docker pull 自带拉取进度条）
+    echo
+    log "开始更新…（拉取镜像将显示实时进度条）"
+    return 0
+}
+
 run_container() {
-    # 已存在同名容器时提示并重建，保证幂等（重复执行不会冲突）
+    # 已存在同名容器时：交互式检查更新 → 确认后可重建（升级路径）
     if docker ps -a --format '{{.Names}}' | grep -qx "${CONTAINER_NAME}"; then
+        check_for_update
         warn "检测到已存在的容器 ${CONTAINER_NAME}，停止并移除后重建……"
         docker rm -f "${CONTAINER_NAME}" >/dev/null
     fi
