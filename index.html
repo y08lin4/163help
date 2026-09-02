@@ -114,7 +114,7 @@ UI_PASSWORD='你的强密码' ./vps-setup.sh</code></pre>
   --memory 1g \
   -e UI_PASSWORD='你的强密码' \
   -e TZ=Asia/Shanghai \
-  -p 3000:3000 \
+  -p 13000:3000 \
   -v ./data:/data \
   ghcr.io/y08lin4/163music-help/docker-client:latest</code></pre>
     </div>
@@ -130,7 +130,7 @@ docker load -i /tmp/163music-docker-client.tar.gz
 
     <ul>
       <li><b>UI_PASSWORD 必设强密码</b>：管理界面登录用，未设置容器会拒绝启动</li>
-      <li>管理界面：<code>http://IP:3000</code>，粘贴网易云 Cookie + portal 客户端密钥（<code>mh_ck_</code> 开头）即可长期运行；宿主机端口冲突时自行映射，如 <code>-p 13000:3000</code></li>
+      <li>管理界面：<code>http://IP:13000</code>，粘贴网易云 Cookie + portal 客户端密钥（<code>mh_ck_</code> 开头）即可长期运行；宿主机端口冲突时自行映射，如 <code>-p 13000:3000</code></li>
       <li><code>-v ./data:/data</code> 数据卷持久化，升级不丢数据；升级 = pull 新镜像 + <code>docker rm -f</code> + 相同数据卷重建</li>
       <li>完整说明见 GitHub 仓库 <a href="https://github.com/y08lin4/163help/tree/main/client-docker">y08lin4/163help · client-docker 目录</a></li>
     </ul>
