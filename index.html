@@ -50,13 +50,12 @@
 <div class="wrap">
   <header>
     <h1>🎵 网易云音乐互助</h1>
-    <p>使用说明 · 当前版本 <b>v4.0.19</b>（2026-08-20）</p>
+    <p>使用说明 · 当前版本 <b>v4.0.21</b>（2026-09-02）</p>
     <p><a class="btn" href="https://163music.linyu.qzz.io/portal">个人中心</a></p>
   </header>
 
   <section class="notice">
-    <b>v4.0.16 更新：</b>播放趋势自动上报——音乐人账号每日自动同步近 30 天播放数据到平台，无需手动填报；被助 30/30 达成时自动发送 SMTP 邮件日报（附余额与支撑天数预测）。<br>
-    扩展用户请重新下载安装包并「重新加载」扩展；油猴用户脚本会自动更新。
+    <b>v4.0.21：</b>修复歌曲保存「待审核」提示与同步；改善心跳与任务状态展示（无心跳播放按规则视为无效）；稳定性与文案优化。——扩展用户请重新下载安装包并「重新加载」扩展；油猴脚本会自动更新。
   </section>
 
   <section>
@@ -80,14 +79,14 @@
       <h3>方式二：浏览器扩展（无需油猴）</h3>
       <p>扩展是油猴脚本的独立移植版，<b>不需要安装 Tampermonkey</b>。额外功能：<b>开机自启</b> + <b>标签静音</b>（只静音网易云音乐标签，其它标签不碰）。</p>
       <ol>
-        <li>下载最新安装包 <code>163help-extension-v4.0.20.zip</code>（<b>最新版直接下载</b>，无需 GitHub）</li>
+        <li>下载最新安装包 <code>163help-extension-v4.0.21.zip</code>（<b>最新版直接下载</b>，无需 GitHub）</li>
         <li>解压，会得到一个 <code>extension/</code> 文件夹</li>
         <li>Chrome 打开 <code>chrome://extensions</code>，点击右上角「开发者模式」</li>
         <li>点「加载已解压的扩展程序」，选择 <code>extension/</code> 文件夹（就是直接包含 <code>manifest.json</code> 的那一层）</li>
       </ol>
       <div class="install">
-        <a class="btn" href="/163help-extension-v4.0.20.zip?v=20260816c">下载 163help-extension-v4.0.20.zip</a>
-        <code>/163help-extension-v4.0.20.zip?v=20260816c</code>
+        <a class="btn" href="/163help-extension-v4.0.21.zip?v=20260902">下载 163help-extension-v4.0.21.zip</a>
+        <code>/163help-extension-v4.0.21.zip?v=20260902</code>
       </div>
       <p class="tip">提示：扩展和油猴是两套独立存储，切换过去需要重新登录一次。</p>
     </div>
@@ -95,7 +94,7 @@
 
   <section>
     <h2>二、Docker 常驻客户端（VPS 24 小时在线互助）</h2>
-    <p>把客户端放进 Docker 容器，在 VPS 上 <b>24 小时常驻互助</b>——无需打开浏览器，无头浏览器（Playwright Chromium）真实播放，一个容器 = 一个网易云账号。当前 Docker 客户端版本 <b>v4.0.19</b>。</p>
+    <p>把客户端放进 Docker 容器，在 VPS 上 <b>24 小时常驻互助</b>——无需打开浏览器，无头浏览器（Playwright Chromium）真实播放，一个容器 = 一个网易云账号。当前 Docker 客户端版本 <b>v4.0.21</b>。</p>
 
     <h3>一键脚本（自动选择镜像通道）</h3>
     <p class="choice-tip">脚本默认先试 GitHub GHCR、失败自动切换 Cloudflare CDN；国内 VPS 可用 <code>IMAGE_SOURCE=cdn</code> 强制走 CDN（免登录，更稳）。</p>
@@ -103,7 +102,7 @@
 chmod +x vps-setup.sh
 UI_PASSWORD='你的强密码' ./vps-setup.sh</code></pre>
 
-    <h3>手动安装：双通道任选其一</h3>
+    <h3>手动安装：双通道任选其一（宿主端口默认 13000，避免与常用服务冲突）</h3>
 
     <div class="method">
       <h3>通道 A：GitHub GHCR（海外推荐）</h3>
@@ -116,24 +115,29 @@ UI_PASSWORD='你的强密码' ./vps-setup.sh</code></pre>
   -e TZ=Asia/Shanghai \
   -p 13000:3000 \
   -v ./data:/data \
-  ghcr.io/y08lin4/163music-help/docker-client:latest</code></pre>
+  ghcr.io/y08lin4/163music-help/docker-client:docker-v4.0.21</code></pre>
+      <p class="tip">Github Release：<a href="https://github.com/y08lin4/163help/releases/tag/v4.0.21">v4.0.21</a></p>
     </div>
 
     <div class="method">
-      <h3>通道 B：Cloudflare CDN tar（国内推荐）</h3>
-      <p>下载 tar 包 + <code>docker load</code>，无需登录任何 registry，国内拉取更稳。</p>
-      <pre><code>curl -fSL -o /tmp/163music-docker-client.tar.gz \
-  https://163music.linyu.qzz.io/docker/163music-docker-client-latest.tar.gz
-docker load -i /tmp/163music-docker-client.tar.gz
-# 然后执行上面「通道 A」的 docker run 命令（同一镜像名）即可</code></pre>
+      <h3>通道 B：Cloudflare CDN 镜像包（国内推荐）</h3>
+      <p>从本站下载 <code>163music-docker-client-latest.tar.gz</code>（当前为 v4.0.21），离线导入：</p>
+      <pre><code># 下载后执行
+docker load -i 163music-docker-client-latest.tar.gz
+docker run -d \
+  --name 163music-docker-client \
+  --restart unless-stopped \
+  --memory 1g \
+  -e UI_PASSWORD='你的强密码' \
+  -e TZ=Asia/Shanghai \
+  -p 13000:3000 \
+  -v ./data:/data \
+  ghcr.io/y08lin4/163music-help/docker-client:docker-v4.0.21</code></pre>
+      <div class="install">
+        <a class="btn" href="/docker/163music-docker-client-latest.tar.gz">下载镜像包（882MB）</a>
+        <code>/docker/163music-docker-client-latest.tar.gz</code>
+      </div>
     </div>
-
-    <ul>
-      <li><b>UI_PASSWORD 必设强密码</b>：管理界面登录用，未设置容器会拒绝启动</li>
-      <li>管理界面：<code>http://IP:13000</code>，粘贴网易云 Cookie + portal 客户端密钥（<code>mh_ck_</code> 开头）即可长期运行；宿主机端口冲突时自行映射，如 <code>-p 13000:3000</code></li>
-      <li><code>-v ./data:/data</code> 数据卷持久化，升级不丢数据；升级 = pull 新镜像 + <code>docker rm -f</code> + 相同数据卷重建</li>
-      <li>完整说明见 GitHub 仓库 <a href="https://github.com/y08lin4/163help/tree/main/client-docker">y08lin4/163help · client-docker 目录</a></li>
-    </ul>
   </section>
 
   <section>
@@ -159,33 +163,26 @@ docker load -i /tmp/163music-docker-client.tar.gz
   </section>
 
   <section>
-    <h2>四、派发与概率规则</h2>
-    <h3>积分（按秒计费）</h3>
-    <p><b>1 点 = 1 秒播放时长</b>。帮助者每听 1 秒赚 1 点，被助者每被听 1 秒扣 1 点，严格守恒。</p>
-    <h3>派发规则（积分档位加权随机抽签）</h3>
-    <p>每次从所有符合条件的候选中按<b>积分档位权重</b>加权随机抽签（不是严格排序），余额越高被抽中的概率越大，但按档位封顶：</p>
-    <ul>
-      <li>余额 ≥ 9000：权重 <b>1.2</b></li>
-      <li>余额 ≥ 3600：权重 <b>1.1</b></li>
-      <li>余额 ≥ 900：权重 <b>1.0</b></li>
-      <li>其余：权重 <b>0.8</b></li>
-      <li>用户偏好（短歌/长歌/随机）做轻微倾斜，不改变积分权重的主导地位</li>
-    </ul>
-    <h3>限额（按次数）</h3>
+    <h2>四、积分与规则（v5 按秒体系）</h2>
+    <h3>积分</h3>
+    <p><b>1 点 = 1 秒播放时长</b>。帮助者每听 1 秒赚 1 点，被助者每被听 1 秒扣 1 点，平台抽 5% 税。</p>
+    <h3>帮听限额（按秒）</h3>
     <table>
       <tr><th>限制</th><th>规则</th></tr>
-      <tr><td>单曲每日被播</td><td>30 次/天</td></tr>
-      <tr><td>单用户每日被助</td><td>30 次/天</td></tr>
-      <tr><td>月度被助</td><td>700 次/月</td></tr>
-      <tr><td>最多挂歌</td><td>默认 3 首，可在「个人中心」申请增加（上限 20）</td></tr>
-      <tr><td>帮过才被助</td><td>已取消（服务器当前配置 <code>MIN_HELPS_BEFORE_RECEIVING=0</code>，不要求先帮过）</td></tr>
+      <tr><td>帮听秒上限</td><td>9,000 秒/天（= min(你最长歌, 300 秒) × 30，无歌=系统基准）</td></tr>
+      <tr><td>每小时</td><td>最多 30 次；同歌 5 分钟冷却；休息窗口随机 30~60 分钟</td></tr>
+      <tr><td>心跳</td><td>播放期间持续上报心跳；<b>无心跳的播放视为无效</b>（任务会按规则过期，需重新听）</td></tr>
+      <tr><td>熔断保护</td><td>连续异常（无心跳过期）会暂停派单，完成任一播放即自动恢复</td></tr>
     </table>
-    <h3>防风控</h3>
-    <ul>
-      <li>连续播放 <b>30~60 分钟</b>（随机）后自动休息一下</li>
-      <li>同一首歌 <b>5 分钟</b>内不重复派发</li>
-      <li>改歌（换歌）需要管理员审核</li>
-    </ul>
+    <h3>被助限额（按次数）</h3>
+    <table>
+      <tr><th>限制</th><th>规则</th></tr>
+      <tr><td>被助次数</td><td>26 次/24 小时、700 次/30 天</td></tr>
+      <tr><td>最多挂歌</td><td>默认 3 首，可在「个人中心」申请增加（上限 20）</td></tr>
+      <tr><td>先帮后助</td><td>不强制（服务器当前配置为不要求先帮过）</td></tr>
+    </table>
+    <h3>派发优先级</h3>
+    <p>按「活跃帮听者 + 公平保底 + 系统歌缺口补位」加权抽签：活跃度高的帮听者权重更高，长期等待者获公平加成；空闲时段由系统歌（系统账号公开曲库）补位，保证随时有单可接。</p>
   </section>
 
   <section class="notice">
