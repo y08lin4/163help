@@ -111,6 +111,17 @@ ensure_free_port() { # 交互提示：冲突时自动换端口
   HOST_PORT="$got"
 }
 
+# ---------- 版本检测 ----------
+local_version() { # 容器版本（env MH_VERSION；旧版容器返回 unknown）
+  docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$1" 2>/dev/null | grep '^MH_VERSION=' | cut -d= -f2 || true
+}
+remote_version() { # GHCR 最高 docker-vX 版本号
+  local tok
+  tok=$(curl -s "https://ghcr.io/token?scope=repository:y08lin4/163help-client/docker-client:pull" | sed -E 's/.*"token":"([^"]+)".*/\1/')
+  curl -s -H "Authorization: Bearer ${tok}" "https://ghcr.io/v2/y08lin4/163help-client/docker-client/tags/list" 2>/dev/null |
+    grep -oE 'docker-v[0-9]+(\.[0-9]+)*' | sort -V | tail -1 | sed 's/docker-v//' || true
+}
+
 # ---------- 镜像操作 ----------
 ghcr_digest_of() { # 远程 latest 的 digest
   local tok digest
