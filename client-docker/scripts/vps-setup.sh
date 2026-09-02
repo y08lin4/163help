@@ -28,7 +28,7 @@ IMAGE="${IMAGE_REPO}:${IMAGE_TAG:-latest}"
 CDN_TAR_URL="https://163music.linyu.qzz.io/docker/163music-docker-client-latest.tar.gz"
 CDN_SHA_URL="${CDN_TAR_URL}.sha256"
 CONF_FILE="${HOME}/.163music-docker-client.conf"
-VERSION="5.0.0"
+VERSION="5.0.3"
 
 # ---------- 输出 ----------
 if [ -t 1 ]; then
