@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --red:#EC4141; --t1:#333; --t2:#999; --line:#E5E5E5; }
+  body { font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif; width:280px; margin:0; color:var(--t1); font-size:13px; }
+  header { display:flex; align-items:center; gap:8px; padding:12px 14px; border-bottom:1px solid var(--line); font-weight:600; }
+  header .dot { width:8px; height:8px; border-radius:50%; background:var(--red); }
+  main { padding:12px 14px; }
+  .row { display:flex; justify-content:space-between; padding:6px 0; color:var(--t2); }
+  .row b { color:var(--t1); font-variant-numeric:tabular-nums; }
+  button { margin-top:10px; width:100%; padding:9px 0; border:none; border-radius:8px; background:var(--red); color:#fff; font-size:13px; cursor:pointer; }
+  button.ghost { background:#fff; color:var(--red); border:1px solid var(--red); margin-top:6px; }
+</style>
+</head>
+<body>
+  <header><span class="dot"></span>网易云音乐互助 · 5.0</header>
+  <main>
+    <div class="row"><span>状态</span><b id="st">检测中…</b></div>
+    <div class="row"><span>今日帮听</span><b id="help">—</b></div>
+    <div class="row"><span>被助</span><b id="recv">—</b></div>
+    <button id="open">打开互助页面</button>
+    <button class="ghost" id="copy">复制诊断信息</button>
+  </main>
+  <script>
+    const BASE = 'https://163music.linyu.qzz.io';
+    const el = (id) => document.getElementById(id);
+    document.getElementById('open').addEventListener('click', async () => {
+      const tabs = await chrome.tabs.query({ url: 'https://music.163.com/*' });
+      if (tabs[0]) chrome.tabs.update(tabs[0].id, { active: true });
+      else chrome.tabs.create({ url: 'https://music.163.com/', muted: true });
+    });
+    document.getElementById('copy').addEventListener('click', () => {
+      const token = (document.body.dataset.diag || '（面板内点击「复制诊断信息」）');
+      navigator.clipboard.writeText(token);
+    });
+    chrome.storage.local.get('mh_install_at').then((d) => {
+      el('st').textContent = '已安装 · v5.0.0';
+    });
+  </script>
+</body>
+</html>
