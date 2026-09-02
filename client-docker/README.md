@@ -21,7 +21,7 @@ docker run -d \
   --memory 1g \
   -e UI_PASSWORD='你的强密码' \
   -e TZ=Asia/Shanghai \
-  -p 3000:3000 \
+  -p 113000:3000 \
   -v ./data:/data \
   ghcr.io/y08lin4/163music-help/docker-client:latest
 ```
@@ -31,7 +31,7 @@ docker run -d \
 | 参数 | 作用 |
 | --- | --- |
 | `-e UI_PASSWORD` | **必填**，Web 管理界面登录密码；不设置容器会拒绝启动 |
-| `-p 3000:3000` | 管理界面端口（宿主 3000 → 容器 3000） |
+| `-p 113000:3000` | 管理界面端口（宿主 3000 → 容器 3000） |
 | `-v ./data:/data` | 数据卷：cookie / store / 会话持久化，升级不丢数据 |
 | `--restart unless-stopped` | 崩溃或重启后自动拉起，实现常驻 |
 | `--memory 1g` | 内存上限 1G，防无头浏览器吃爆内存 |
@@ -52,7 +52,7 @@ docker compose up -d
 
 ## 首次配置（三步）
 
-1. **登录**：浏览器打开 `http://IP:3000`，输入刚才设置的 `UI_PASSWORD`。
+1. **登录**：浏览器打开 `http://IP:13000`，输入刚才设置的 `UI_PASSWORD`。
 2. **粘贴 Cookie**：在浏览器按 `F12` 打开开发者工具，在 Network/Application 中找到网易云音乐的 `MUSIC_U` 与 `__csrf`，复制到客户端粘贴。
    > ⚠️ Cookie 等同账号登录凭证，**请勿外泄**，也切勿公开截图、分享给他人或提交到任何仓库。
 3. **填写服务端凭证**：在门户（portal）的凭证管理页生成并复制**客户端密钥**（以 `mh_ck_` 开头），粘贴即可**长期直接使用**，无需反复授权。
