@@ -210,6 +210,10 @@ cmd_upgrade() {
   require_root; require_docker
   container_exists || die "未找到容器 ${CONTAINER_NAME}（全新部署请用 install）"
   echo; step 1 4 "检查更新"
+  local lv
+  lv=$(local_version "$CONTAINER_NAME")
+  echo "  当前版本: ${lv:-${C_WARN}旧版（无版本标记）${C_OFF}}"
+  echo "  最新版本: $(remote_version 2>/dev/null || echo 未知)"
   if ! need_update; then ok "当前已是最新版本，无需升级。"; return 0; fi
   local r d
   r=$(ghcr_digest_of latest); d=$(local_digest "$CONTAINER_NAME" 2>/dev/null || true)
@@ -258,6 +262,9 @@ cmd_status() {
     echo "  ${C_DIM}○ 未安装${C_OFF}     （install 全新安装）"
   fi
   if container_exists; then
+    local lv
+    lv=$(local_version "$CONTAINER_NAME")
+    if [ -n "$lv" ]; then echo "  版本: ${C_OK}${lv}${C_OFF}"; else echo "  版本: ${C_WARN}旧版（无版本标记，建议 upgrade）${C_OFF}"; fi
     echo "  镜像: $(docker inspect -f '{{.Config.Image}}' "$CONTAINER_NAME")"
     local d; d=$(local_digest "$CONTAINER_NAME" 2>/dev/null || true); [ -n "$d" ] && echo "  本机digest: ${d:0:16}…"
     echo "  端口映射: $(docker port "$CONTAINER_NAME" 2>/dev/null | tr '\n' ' ')"
