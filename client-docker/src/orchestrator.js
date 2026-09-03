@@ -26,6 +26,7 @@ const KEYS = {
   control: 'controlRequest',        // 'start' | 'stop'
   cookies: 'cookies',
   cookiesDirty: 'cookiesDirty',
+  pageReloadDirty: 'pageReloadDirty',
   preference: 'preference',         // short | long | random（store 层键）
   windowStart: 'activeWindowStart',
   windowEnd: 'activeWindowEnd',
@@ -60,6 +61,8 @@ class Orchestrator {
     this._lockChecked = false;      // 是否已完成首次 /api/me 账号锁定
     this._lastPrefSnapshot = null;
     this._lastCookieSnapshot = null;
+    this._lastTokenSnapshot = null;
+    this._lastStatsSnap = '';
   }
 
   _log(level, msg) {
@@ -101,7 +104,6 @@ class Orchestrator {
     }
     this._stopRequested = false;
     await this._setRunState({ orchestrator: true, browser: false });
-    this._log('info', 'orchestrator start() 已调用');
 
     // 消费遗留 stop 意图（幂等启动）
     const pending = this.store.get(KEYS.control, null);
@@ -118,6 +120,7 @@ class Orchestrator {
     // 记录初始快照，供轮询检测变更
     this._lastCookieSnapshot = String(this.store.get(KEYS.cookies, '') || '').trim();
     this._lastPrefSnapshot = String(this.store.get(KEYS.preference, this.config.preference) || '').trim();
+    this._lastTokenSnapshot = String(this.store.get(TOKEN_KEY, '') || '').trim();
 
     await this._startBrowserWithRetry();
     this._startPolling();
@@ -142,7 +145,7 @@ class Orchestrator {
         };
         await this.browser.launch();
         await this._setRunState({ browser: true });
-        this._log('info', '浏览器启动成功（尝试 ' + attempt + '）');
+        if (attempt > 1) this._log('info', 'Chromium 已启动（第 ' + attempt + ' 次尝试）');
         return;
       } catch (e) {
         this._log('warn', '浏览器启动失败（尝试 ' + attempt + '/' + START_RETRY_MAX + '）：' + (e && e.message ? e.message : e));
@@ -230,9 +233,11 @@ class Orchestrator {
       return;
     }
 
-    // 2) 配置变更检测 → cookie 变更重载页面
+    // 2) 配置变更检测 → cookie / 偏好 / 凭证变更重载页面
     const cookieNow = String(this.store.get(KEYS.cookies, '') || '').trim();
     const prefNow = String(this.store.get(KEYS.preference, this.config.preference) || '').trim();
+    const tokenNow = String(this.store.get(TOKEN_KEY, '') || '').trim();
+    const reloadDirty = !!this.store.get(KEYS.pageReloadDirty, false);
     if (this.store.get(KEYS.cookiesDirty, false) || cookieNow !== this._lastCookieSnapshot) {
       await this.store.delete(KEYS.cookiesDirty);
       this._lastCookieSnapshot = cookieNow;
@@ -244,6 +249,12 @@ class Orchestrator {
       this._log('info', '检测到偏好变更（' + prefNow + '），安排重载页面生效');
       if (this.browser && this.browser.browser) this.browser.scheduleReload();
     }
+    if (reloadDirty || tokenNow !== this._lastTokenSnapshot) {
+      if (reloadDirty) await this.store.delete(KEYS.pageReloadDirty);
+      this._lastTokenSnapshot = tokenNow;
+      this._log('info', '检测到密钥/凭证变更，安排重载页面生效');
+      if (this.browser && this.browser.browser) this.browser.scheduleReload();
+    }
 
     // 3) 账号锁定与状态拉取
     if (this.api.hasCredential()) {
@@ -252,24 +263,22 @@ class Orchestrator {
     }
   }
 
-  /** 首次 /api/me 锁定账号；之后比对 user_id，变化即告警并停止。 */
+  /** 首次 /api/me 锁定账号；仅 user_id 变化才停止。网络失败保持运行。 */
   async _lockAccountCheck() {
-    const ok = await this.api.verifyAndLockAccount();
-    if (!ok && this._lockChecked) {
-      // 已锁定过但本次校验失败（user_id 变化被 api-client 判定为 false 已 alarm）
-      this._log('error', '账号校验失败，停止循环');
+    const result = await this.api.verifyAndLockAccount();
+    if (result && result.ok) {
+      this._lockChecked = true;
+      return;
+    }
+    if (result && result.reason === 'mismatch') {
+      this._log('error', '账号校验失败（user_id 变化），停止循环');
       this._stopRequested = true;
       this._cancelReconnect();
       await this._stopBrowser();
       await this._setRunState({ orchestrator: false, browser: false });
       return;
     }
-    if (!ok && !this._lockChecked) {
-      // 首次校验失败（无 user / 请求失败）——不视为锁定变化，下轮重试
-      this._log('warn', '首次 /api/me 校验失败，下轮重试');
-      return;
-    }
-    this._lockChecked = true;
+    this._log('warn', '账号校验暂时失败（网络或空响应），保持运行并下轮重试');
   }
 
   /** 拉取 /api/me，把今日帮了/被助/积分写入 store（字段与服务端 /api/me 对齐）。 */
@@ -292,6 +301,14 @@ class Orchestrator {
           const credits = me.participant.available_credits != null ? me.participant.available_credits : me.participant.credits;
           if (credits != null) upd[KEYS.points] = Number(credits) || 0;
           if (Object.keys(upd).length) await this.store.setMany(upd);
+          const helped = Number(me.participant.today_helped_count) || 0;
+          const received = Number(me.participant.today_received_help_count) || 0;
+          const pts = Number(credits) || 0;
+          const snap = helped + '/' + received + '/' + pts;
+          if (snap !== this._lastStatsSnap) {
+            this._lastStatsSnap = snap;
+            this._log('info', `状态 今日帮了 ${helped} · 被助 ${received} · 积分 ${pts}`);
+          }
         }
       }
     } catch (e) {

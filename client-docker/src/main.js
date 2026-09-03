@@ -23,13 +23,36 @@ if (!config.hasPassword || String(config.uiPassword).length === 0) {
 // —— 日志环形缓冲区（供 server.js 尾部读取） ——
 const MAX_LOG_LINES = 1000;
 const logBuffer = [];
+
+function formatLogTime(date, timeZone) {
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: timeZone || 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(date);
+    const get = (type) => {
+      const p = parts.find((x) => x.type === type);
+      return p ? p.value : '';
+    };
+    return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+  } catch (e) {
+    return date.toISOString().replace('T', ' ').slice(0, 19);
+  }
+}
+
 function appendLog(level, message) {
-  const ts = new Date().toISOString();
+  const ts = formatLogTime(new Date(), config.tz);
   const line = `[${ts}] [${level}] ${message}`;
   logBuffer.push(line);
   if (logBuffer.length > MAX_LOG_LINES) logBuffer.shift();
   // 同时打到标准输出，便于 docker logs -f 查看。
-  if (level === 'error') console.error(line);
+  if (level === 'error' || level === 'alert') console.error(line);
   else console.log(line);
 }
 

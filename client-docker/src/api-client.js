@@ -245,24 +245,25 @@ class ApiClient {
 
   /**
    * 认证成功后的 /api/me 校验 + 账号锁定。
-   * 首次记录 user_id + 用户名；之后 user_id 变化 → 报警并返回 false（调用方停止循环）。
+   * @returns {{ok:boolean, reason?:'mismatch'|'unavailable'}}
+   *   mismatch = user_id 变化（调用方应停止）；unavailable = 网络/空响应（应保持运行并重试）。
    */
   async verifyAndLockAccount() {
     const me = await this.callAPI('GET', '/me');
-    if (!me || !me.user) return false;
+    if (!me || !me.user) return { ok: false, reason: 'unavailable' };
     const userId = String(me.user.id != null ? me.user.id : '');
     const displayName = String(me.user.displayName || me.user.username || '');
     const locked = this.lockedAccount();
     if (locked && locked.userId) {
       if (locked.userId !== userId) {
         this._alarm(`账号锁定：user_id 从 ${locked.userId} 变更为 ${userId}，已停止循环`);
-        return false;
+        return { ok: false, reason: 'mismatch' };
       }
     } else {
       this.markAccountLocked(userId, displayName);
       this._log('info', `账号已锁定：${displayName} (id=${userId})`);
     }
-    return true;
+    return { ok: true };
   }
 
   // —— 状态读取端点（UI 展示） ——
